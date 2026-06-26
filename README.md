@@ -38,7 +38,9 @@ Lux abre prácticamente todo. **Vectorial** rasterizado con nanosvg (nítido a c
 
 **Por decoders propios integrados** (header-only, sin dependencias):
 
-> `qoi` · `tga` · `hdr` · `ppm` · `pgm` · `pbm` · `pnm` · `pic` · `psd`
+> `qoi` · `exr` (OpenEXR HDR) · `pcx` · `pfm` · `ff` (farbfeld) · `ras` / `sun` · `sgi` / `rgb` / `bw` · `wbmp` · `pam` · `xbm` · `tga` · `hdr` · `ppm` / `pgm` / `pbm` / `pnm` · `pic` · `psd`
+
+<sub>Si el formato de imagen existe, es muy probable que Lux lo abra.</sub>
 
 <sub>* webp/heic/avif/jxl usan las extensiones de códec de Windows (gratis en Microsoft Store; en Windows 11 suelen venir preinstaladas). Si falta alguna, Lux te avisa cuál instalar.</sub>
 
@@ -108,7 +110,7 @@ o asocialo en _Abrir con…_ y usalo como visor por defecto.
 | Pieza                  | Rol                                                                            |
 |------------------------|--------------------------------------------------------------------------------|
 | `lux.cpp`              | Todo: ventana frameless, decodificación (WIC + stb + SVG + QOI), render D2D, input, navegación |
-| `third_party/`         | Decoders _header-only_: `stb_image` (tga/hdr/pnm/psd…), `nanosvg` (SVG vectorial), `qoi` (QOI) |
+| `third_party/`         | Decoders _header-only_: `stb_image`, `nanosvg` (SVG), `qoi`, `tinyexr` (EXR, reusa el zlib de stb), `exotic.h` (pcx/farbfeld/pfm/sun/sgi/wbmp/pam/xbm) |
 | `lux.manifest`         | DPI _per-monitor v2_, common controls, code page UTF-8                          |
 | `lux.rc`               | Icono + versión + manifest embebidos                                           |
 | `gen-icon.ps1`         | Genera `lux.ico` multi-resolución con System.Drawing                            |
