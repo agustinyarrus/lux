@@ -28,15 +28,19 @@ desenfocado. **Funciona 100% offline** y no carga ningún runtime: es Win32 a se
 
 ## 🖼️ Formatos
 
-Decodificados por **WIC** (con los códecs del sistema / Microsoft Store):
+Lux abre prácticamente todo. **Vectorial** rasterizado con nanosvg (nítido a cualquier zoom):
 
-> `jpg` · `jpeg` · `png` · `gif` · `bmp` · `tiff` · `ico` · `dds` · `jxr` / `hdp` · `webp`* · `heic`* · `avif`* · `raw`* (`cr2` `nef` `arw` `dng` …)
+> `svg`
 
-Y los que WIC no trae, por **stb_image** integrado:
+**Por WIC**, con los códecs del sistema / Microsoft Store:
 
-> `tga` · `hdr` · `ppm` · `pgm` · `pbm` · `pnm` · `pic` · `psd`
+> `jpg` · `jpeg` · `png` · `gif` · `bmp` · `tiff` · `ico` · `dds` · `jxr` / `hdp` · `webp`* · `heic`* / `heif`* · `avif`* · `jxl`* · `raw`* (`cr2` `cr3` `nef` `arw` `dng` `orf` `rw2` `raf` `srw` `pef` …)
 
-<sub>* requieren la extensión de códec correspondiente instalada (gratis desde Microsoft Store).</sub>
+**Por decoders propios integrados** (header-only, sin dependencias):
+
+> `qoi` · `tga` · `hdr` · `ppm` · `pgm` · `pbm` · `pnm` · `pic` · `psd`
+
+<sub>* webp/heic/avif/jxl usan las extensiones de códec de Windows (gratis en Microsoft Store; en Windows 11 suelen venir preinstaladas). Si falta alguna, Lux te avisa cuál instalar.</sub>
 
 ## 🎛️ Características
 
@@ -103,8 +107,8 @@ o asocialo en _Abrir con…_ y usalo como visor por defecto.
 
 | Pieza                  | Rol                                                                            |
 |------------------------|--------------------------------------------------------------------------------|
-| `lux.cpp`              | Todo: ventana frameless, decodificación WIC+stb, render D2D, input, navegación |
-| `third_party/stb_image.h` | Decodificador _header-only_ para los formatos que WIC no cubre              |
+| `lux.cpp`              | Todo: ventana frameless, decodificación (WIC + stb + SVG + QOI), render D2D, input, navegación |
+| `third_party/`         | Decoders _header-only_: `stb_image` (tga/hdr/pnm/psd…), `nanosvg` (SVG vectorial), `qoi` (QOI) |
 | `lux.manifest`         | DPI _per-monitor v2_, common controls, code page UTF-8                          |
 | `lux.rc`               | Icono + versión + manifest embebidos                                           |
 | `gen-icon.ps1`         | Genera `lux.ico` multi-resolución con System.Drawing                            |

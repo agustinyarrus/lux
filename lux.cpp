@@ -36,6 +36,15 @@
 #define STBI_WINDOWS_UTF8
 #include "third_party/stb_image.h"
 
+#define NANOSVG_IMPLEMENTATION
+#define NANOSVGRAST_IMPLEMENTATION
+#include "third_party/nanosvg.h"
+#include "third_party/nanosvgrast.h"
+
+#define QOI_NO_STDIO
+#define QOI_IMPLEMENTATION
+#include "third_party/qoi.h"
+
 #pragma comment(lib, "d2d1.lib")
 #pragma comment(lib, "dwrite.lib")
 #pragma comment(lib, "windowscodecs.lib")
@@ -144,6 +153,8 @@ struct State {
     int  capKeyIdx = -2, capKeyTotal = -1;
     LONG capKeyW = -1;
     UINT capKeyDpi = 0;
+
+    std::wstring loadError;  // mensaje cuando un archivo no se pudo abrir (formato/codec)
 
     // ventana
     bool  fullscreen = false;
@@ -264,6 +275,8 @@ static bool isImageExt(const std::wstring& e) {
         L"cr2",L"cr3",L"nef",L"arw",L"dng",L"orf",L"rw2",L"raf",L"srw",L"pef",
         // stb
         L"tga",L"targa",L"hdr",L"pic",L"ppm",L"pgm",L"pbm",L"pnm",L"psd",
+        // decoders propios (header-only)
+        L"svg",L"qoi",
     };
     for (auto* x : exts) if (e == x) return true;
     return false;
@@ -323,6 +336,39 @@ static void buildFolderList(const std::wstring& filePath) {
 // ---------------------------------------------------------------------------
 //  Decodificacion -> ID2D1Bitmap
 // ---------------------------------------------------------------------------
+static bool readFileBytes(const std::wstring& path, std::vector<unsigned char>& buf) {
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    LARGE_INTEGER sz{};
+    if (!GetFileSizeEx(h, &sz) || sz.QuadPart <= 0 || sz.QuadPart > (1LL << 30)) { CloseHandle(h); return false; }
+    buf.resize((size_t)sz.QuadPart);
+    DWORD rd = 0;
+    BOOL ok = ReadFile(h, buf.data(), (DWORD)buf.size(), &rd, nullptr);
+    CloseHandle(h);
+    return ok && rd == buf.size();
+}
+
+// RGBA (straight) -> ID2D1Bitmap BGRA premultiplicado. Modifica rgba in-place; D2D copia el buffer.
+static bool bitmapFromRGBA(unsigned char* rgba, UINT w, UINT h, ComPtr<ID2D1Bitmap>& out) {
+    if (!g.rt || !rgba || !w || !h) return false;
+    size_t n = (size_t)w * h;
+    for (size_t i = 0; i < n; ++i) {
+        unsigned char* p = rgba + i * 4;
+        unsigned char r = p[0], gg = p[1], b = p[2], a = p[3];
+        p[0] = (unsigned char)((b * a + 127) / 255);
+        p[1] = (unsigned char)((gg * a + 127) / 255);
+        p[2] = (unsigned char)((r * a + 127) / 255);
+        p[3] = a;
+    }
+    D2D1_BITMAP_PROPERTIES bp = D2D1::BitmapProperties(
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+    ComPtr<ID2D1Bitmap> bmp;
+    if (FAILED(g.rt->CreateBitmap(D2D1::SizeU(w, h), rgba, w * 4, bp, &bmp))) return false;
+    out = bmp;
+    return true;
+}
+
 static bool decodeWIC(const std::wstring& path, ComPtr<ID2D1Bitmap>& out, UINT& w, UINT& h) {
     if (!g.wic || !g.rt) return false;
     ComPtr<IWICBitmapDecoder> dec;
@@ -349,29 +395,68 @@ static bool decodeSTB(const std::wstring& path, ComPtr<ID2D1Bitmap>& out, UINT& 
     int iw, ih, n;
     stbi_uc* data = stbi_load(u8.c_str(), &iw, &ih, &n, 4); // RGBA
     if (!data) return false;
-
-    // RGBA (straight) -> BGRA premultiplicado (lo que espera D2D)
-    size_t px = (size_t)iw * ih;
-    for (size_t i = 0; i < px; ++i) {
-        stbi_uc* p = data + i * 4;
-        stbi_uc r = p[0], gg = p[1], b = p[2], a = p[3];
-        p[0] = (stbi_uc)((b * a + 127) / 255);
-        p[1] = (stbi_uc)((gg * a + 127) / 255);
-        p[2] = (stbi_uc)((r * a + 127) / 255);
-        p[3] = a;
-    }
-    D2D1_BITMAP_PROPERTIES bp = D2D1::BitmapProperties(
-        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
-    ComPtr<ID2D1Bitmap> bmp;
-    HRESULT hr = g.rt->CreateBitmap(D2D1::SizeU(iw, ih), data, iw * 4, bp, &bmp);
+    bool ok = bitmapFromRGBA(data, (UINT)iw, (UINT)ih, out);
     stbi_image_free(data);
-    if (FAILED(hr)) return false;
-    out = bmp; w = (UINT)iw; h = (UINT)ih;
+    if (ok) { w = (UINT)iw; h = (UINT)ih; }
+    return ok;
+}
+
+// SVG vectorial (nanosvg): se rasteriza a ~1600 px en el lado mayor (nitido al hacer zoom).
+static bool decodeSVG(const std::wstring& path, ComPtr<ID2D1Bitmap>& out, UINT& ow, UINT& oh) {
+    if (!g.rt) return false;
+    std::vector<unsigned char> buf;
+    if (!readFileBytes(path, buf)) return false;
+    buf.push_back(0); // nsvgParse necesita un string mutable terminado en NUL
+    NSVGimage* img = nsvgParse((char*)buf.data(), "px", 96.0f);
+    if (!img) return false;
+    if (img->width < 1.f || img->height < 1.f) { nsvgDelete(img); return false; }
+    float maxDim = std::max(img->width, img->height);
+    float scale = std::min(std::max(1600.f / maxDim, 0.1f), 8.0f);
+    if (maxDim * scale > 4096.f) scale = 4096.f / maxDim;        // tope absoluto
+    UINT w = std::max<UINT>(1, (UINT)lround(img->width  * scale));
+    UINT h = std::max<UINT>(1, (UINT)lround(img->height * scale));
+    NSVGrasterizer* rast = nsvgCreateRasterizer();
+    if (!rast) { nsvgDelete(img); return false; }
+    std::vector<unsigned char> px((size_t)w * h * 4);
+    nsvgRasterize(rast, img, 0, 0, scale, px.data(), (int)w, (int)h, (int)(w * 4));
+    nsvgDeleteRasterizer(rast);
+    nsvgDelete(img);
+    if (!bitmapFromRGBA(px.data(), w, h, out)) return false;
+    ow = w; oh = h;
     return true;
+}
+
+// QOI (Quite OK Image): decodifica desde memoria; valida su firma 'qoif'.
+static bool decodeQOI(const std::wstring& path, ComPtr<ID2D1Bitmap>& out, UINT& ow, UINT& oh) {
+    if (!g.rt) return false;
+    std::vector<unsigned char> buf;
+    if (!readFileBytes(path, buf) || buf.size() < 14) return false;
+    qoi_desc desc{};
+    void* pixels = qoi_decode(buf.data(), (int)buf.size(), &desc, 4); // RGBA
+    if (!pixels) return false;
+    bool ok = bitmapFromRGBA((unsigned char*)pixels, desc.width, desc.height, out);
+    QOI_FREE(pixels);
+    if (ok) { ow = desc.width; oh = desc.height; }
+    return ok;
+}
+
+// Cadena unica: elige decoder por extension y cae a otros si falla.
+static bool decodeAny(const std::wstring& path, ComPtr<ID2D1Bitmap>& bmp, UINT& w, UINT& h) {
+    std::wstring e = extOf(path);
+    if (e == L"svg") return decodeSVG(path, bmp, w, h);
+    if (e == L"qoi") return decodeQOI(path, bmp, w, h);
+    if (prefersStb(e)) {
+        if (decodeSTB(path, bmp, w, h)) return true;
+        return decodeWIC(path, bmp, w, h);
+    }
+    if (decodeWIC(path, bmp, w, h)) return true;
+    if (decodeSTB(path, bmp, w, h)) return true;
+    return decodeQOI(path, bmp, w, h);   // QOI valida su firma: seguro como ultimo recurso
 }
 
 static void fitToWindow();                     // fwd
 static void applyWindowSizing(bool recenter);  // fwd
+static void openPath(const std::wstring& path);// fwd
 static void invalidate()     { if (g.hwnd) InvalidateRect(g.hwnd, nullptr, FALSE); }
 
 // Muestra el HUD (resolucion + zoom) al instante y reinicia su cuenta de 3 s.
@@ -388,15 +473,8 @@ static bool loadIndex(int i) {
     std::wstring e = extOf(path);
 
     ComPtr<ID2D1Bitmap> bmp; UINT w = 0, h = 0;
-    bool ok = false;
-    if (prefersStb(e)) {
-        ok = decodeSTB(path, bmp, w, h);
-        if (!ok) ok = decodeWIC(path, bmp, w, h);
-    } else {
-        ok = decodeWIC(path, bmp, w, h);
-        if (!ok) ok = decodeSTB(path, bmp, w, h);
-    }
-    if (!ok) return false;
+    if (!decodeAny(path, bmp, w, h)) return false;
+    g.loadError.clear();
 
     g.bmp = bmp; g.imgW = w; g.imgH = h;
     g.imgPath = path; g.idx = i;
@@ -583,10 +661,8 @@ static bool createDeviceResources() {
 
     // Si ya habia imagen, recrear su bitmap en el nuevo target
     if (!g.imgPath.empty()) {
-        ComPtr<ID2D1Bitmap> bmp; UINT w, h; std::wstring e = extOf(g.imgPath);
-        bool ok = prefersStb(e) ? (decodeSTB(g.imgPath,bmp,w,h) || decodeWIC(g.imgPath,bmp,w,h))
-                                : (decodeWIC(g.imgPath,bmp,w,h) || decodeSTB(g.imgPath,bmp,w,h));
-        if (ok) { g.bmp = bmp; g.imgW = w; g.imgH = h; }
+        ComPtr<ID2D1Bitmap> bmp; UINT w, h;
+        if (decodeAny(g.imgPath, bmp, w, h)) { g.bmp = bmp; g.imgW = w; g.imgH = h; }
     }
     return true;
 }
@@ -793,17 +869,18 @@ static void drawEmpty() {
     RECT rc; GetClientRect(g.hwnd, &rc);
     float cx = rc.right * 0.5f, cy = rc.bottom * 0.5f;
     drawSpark(cx, cy - dpf(34), dpf(46));
+    bool err = !g.loadError.empty();
     if (g.tfTitle) {
-        setBrush(col::fgDim, 1.f);
+        setBrush(err ? col::danger : col::fgDim, err ? 0.9f : 1.f);
         D2D1_RECT_F tr = D2D1::RectF(0, cy + dpf(16), (float)rc.right, cy + dpf(40));
-        const wchar_t* t = L"Lux";
-        g.rt->DrawTextW(t, 3, g.tfTitle.Get(), tr, g.brush.Get());
+        const wchar_t* t = err ? L"No se pudo abrir" : L"Lux";
+        g.rt->DrawTextW(t, (UINT32)wcslen(t), g.tfTitle.Get(), tr, g.brush.Get());
     }
     if (g.tfHint) {
         setBrush(col::fgFaint, 1.f);
-        D2D1_RECT_F tr = D2D1::RectF(0, cy + dpf(44), (float)rc.right, cy + dpf(66));
-        const wchar_t* t = L"Ctrl+O para abrir   ·   o arrastrá una imagen";
-        g.rt->DrawTextW(t, (UINT32)wcslen(t), g.tfHint.Get(), tr, g.brush.Get());
+        D2D1_RECT_F tr = D2D1::RectF(dpf(20), cy + dpf(44), (float)rc.right - dpf(20), cy + dpf(112));
+        std::wstring t = err ? g.loadError : std::wstring(L"Ctrl+O para abrir   ·   o arrastrá una imagen");
+        g.rt->DrawTextW(t.c_str(), (UINT32)t.size(), g.tfHint.Get(), tr, g.brush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
     }
 }
 
@@ -920,19 +997,26 @@ static void openDialog() {
     OPENFILENAMEW ofn{ sizeof(ofn) };
     ofn.hwndOwner = g.hwnd;
     ofn.lpstrFilter =
-        L"Imágenes\0*.jpg;*.jpeg;*.png;*.gif;*.bmp;*.tif;*.tiff;*.webp;*.heic;*.avif;*.ico;"
-        L"*.tga;*.hdr;*.ppm;*.pgm;*.pbm;*.pnm;*.psd;*.dds;*.jxr;*.dng;*.cr2;*.nef;*.arw\0"
+        L"Imágenes\0*.jpg;*.jpeg;*.png;*.gif;*.bmp;*.tif;*.tiff;*.webp;*.heic;*.heif;*.avif;*.jxl;*.svg;*.qoi;"
+        L"*.ico;*.tga;*.hdr;*.ppm;*.pgm;*.pbm;*.pnm;*.psd;*.dds;*.jxr;*.dng;*.cr2;*.nef;*.arw\0"
         L"Todos\0*.*\0\0";
     ofn.lpstrFile = file; ofn.nMaxFile = MAX_PATH;
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER;
-    if (GetOpenFileNameW(&ofn)) {
-        buildFolderList(file);
-        loadIndex(g.idx);
-    }
+    if (GetOpenFileNameW(&ofn)) openPath(file);
 }
 static void openPath(const std::wstring& path) {
     buildFolderList(path);
-    if (!loadIndex(g.idx)) navigate(1);
+    if (loadIndex(g.idx)) return;
+    // el archivo pedido no se pudo decodificar -> mensaje claro
+    g.bmp.Reset();
+    std::wstring e = extOf(path);
+    g.loadError = baseName(path) + L"\n";
+    if (e==L"webp"||e==L"heic"||e==L"heif"||e==L"avif"||e==L"jxl")
+        g.loadError += L"Falta la extensión de códec — instalala gratis desde Microsoft Store";
+    else
+        g.loadError += L"Formato no soportado o archivo dañado";
+    SetWindowTextW(g.hwnd, (baseName(path) + L"  —  Lux").c_str());
+    invalidate();
 }
 
 // ---------------------------------------------------------------------------
@@ -1249,10 +1333,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
 
     // abrir el archivo pasado por linea de comandos (ajusta la ventana si el modo esta activo)
     int argc = 0; LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    if (argv && argc > 1) {
-        buildFolderList(argv[1]);
-        loadIndex(g.idx);
-    }
+    if (argv && argc > 1) openPath(argv[1]);
     if (argv) LocalFree(argv);
 
     // mostrar (maximizada si asi se guardo)
