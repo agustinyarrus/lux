@@ -27,6 +27,10 @@
 #include <vector>
 #include <algorithm>
 #include <cmath>
+#include <fstream>
+#include <sstream>
+#include <cctype>
+#include <climits>
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_WINDOWS_UTF8
@@ -71,6 +75,16 @@ static const int TBH_L   = 38;   // alto barra de titulo
 static const int BTNW_L  = 46;   // ancho de cada boton de ventana
 static const int RSZ_L   = 6;    // borde de resize (hit-test)
 static const UINT IDT_ANIM = 1;  // timer de animacion del cromo
+
+// ---------------------------------------------------------------------------
+//  Configuracion persistente (%APPDATA%\Lux\config.json)
+// ---------------------------------------------------------------------------
+struct Config {
+    bool fitWindow = false;   // "ventana pegada a la imagen": ajusta la ventana al tamaño de cada imagen
+    bool maximized = false;   // recordar si estaba maximizada
+    bool hasWin    = false;   // ¿hay geometria guardada?
+    int  winX = 100, winY = 100, winW = 1100, winH = 720; // tamaño/posicion en modo manual
+};
 
 // ---------------------------------------------------------------------------
 //  Estado global
@@ -124,6 +138,10 @@ struct State {
     WINDOWPLACEMENT prevPlace{ sizeof(WINDOWPLACEMENT) };
     bool  effectsOk = false; // blur/sombra disponibles
     ComPtr<ID2D1Effect> blur, shadow;
+
+    // configuracion persistente
+    Config cfg;
+    bool   firstSize = true; // la 1a imagen centra la ventana en el monitor
 };
 static State g;
 
@@ -153,6 +171,73 @@ static std::string toUtf8(const std::wstring& w) {
     std::string s(n, 0);
     WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), s.data(), n, nullptr, nullptr);
     return s;
+}
+
+// ---------------------------------------------------------------------------
+//  Configuracion persistente (mini lector/escritor JSON plano)
+// ---------------------------------------------------------------------------
+static std::wstring configPath() {
+    wchar_t buf[MAX_PATH];
+    DWORD n = GetEnvironmentVariableW(L"APPDATA", buf, MAX_PATH);
+    std::wstring dir = (n > 0 && n < MAX_PATH) ? std::wstring(buf) : std::wstring(L".");
+    dir += L"\\Lux";
+    CreateDirectoryW(dir.c_str(), nullptr);
+    return dir + L"\\config.json";
+}
+static bool jsonBool(const std::string& s, const char* key, bool def) {
+    std::string k = std::string("\"") + key + "\"";
+    size_t p = s.find(k); if (p == std::string::npos) return def;
+    p = s.find(':', p + k.size()); if (p == std::string::npos) return def;
+    ++p; while (p < s.size() && isspace((unsigned char)s[p])) ++p;
+    return s.compare(p, 4, "true") == 0;
+}
+static long jsonInt(const std::string& s, const char* key, long def) {
+    std::string k = std::string("\"") + key + "\"";
+    size_t p = s.find(k); if (p == std::string::npos) return def;
+    p = s.find(':', p + k.size()); if (p == std::string::npos) return def;
+    ++p; while (p < s.size() && isspace((unsigned char)s[p])) ++p;
+    bool neg = false; if (p < s.size() && (s[p] == '-' || s[p] == '+')) { neg = (s[p] == '-'); ++p; }
+    if (p >= s.size() || !isdigit((unsigned char)s[p])) return def;
+    long v = 0; while (p < s.size() && isdigit((unsigned char)s[p])) { v = v * 10 + (s[p] - '0'); ++p; }
+    return neg ? -v : v;
+}
+static void loadConfig() {
+    std::ifstream f(configPath().c_str(), std::ios::binary);
+    if (!f) return;
+    std::stringstream ss; ss << f.rdbuf();
+    std::string s = ss.str();
+    g.cfg.fitWindow = jsonBool(s, "fitWindowToImage", false);
+    g.cfg.maximized = jsonBool(s, "maximized", false);
+    long x = jsonInt(s, "winX", LONG_MIN), y = jsonInt(s, "winY", LONG_MIN);
+    long w = jsonInt(s, "winW", 0),        h = jsonInt(s, "winH", 0);
+    if (w >= 200 && h >= 150 && x != LONG_MIN && y != LONG_MIN) {
+        g.cfg.winX = (int)x; g.cfg.winY = (int)y; g.cfg.winW = (int)w; g.cfg.winH = (int)h;
+        g.cfg.hasWin = true;
+    }
+}
+static void saveConfig() {
+    // capturar geometria actual si la ventana esta en estado normal (no maximizada/fullscreen)
+    if (g.hwnd && !g.fullscreen) {
+        g.cfg.maximized = IsZoomed(g.hwnd) != 0;
+        if (!g.cfg.maximized) {
+            RECT r;
+            if (GetWindowRect(g.hwnd, &r)) {
+                g.cfg.winX = r.left; g.cfg.winY = r.top;
+                g.cfg.winW = r.right - r.left; g.cfg.winH = r.bottom - r.top;
+                g.cfg.hasWin = true;
+            }
+        }
+    }
+    std::ofstream f(configPath().c_str(), std::ios::binary | std::ios::trunc);
+    if (!f) return;
+    f << "{\n"
+      << "  \"fitWindowToImage\": " << (g.cfg.fitWindow ? "true" : "false") << ",\n"
+      << "  \"maximized\": "        << (g.cfg.maximized ? "true" : "false") << ",\n"
+      << "  \"winX\": " << g.cfg.winX << ",\n"
+      << "  \"winY\": " << g.cfg.winY << ",\n"
+      << "  \"winW\": " << g.cfg.winW << ",\n"
+      << "  \"winH\": " << g.cfg.winH << "\n"
+      << "}\n";
 }
 
 // Extensiones soportadas (para listar la carpeta).
@@ -273,7 +358,8 @@ static bool decodeSTB(const std::wstring& path, ComPtr<ID2D1Bitmap>& out, UINT& 
     return true;
 }
 
-static void fitToWindow();   // fwd
+static void fitToWindow();                     // fwd
+static void applyWindowSizing(bool recenter);  // fwd
 static void invalidate()     { if (g.hwnd) InvalidateRect(g.hwnd, nullptr, FALSE); }
 
 static bool loadIndex(int i) {
@@ -297,6 +383,10 @@ static bool loadIndex(int i) {
     g.fmtLabel = fmtLabelFor(e);
     g.fit = true;
     fitToWindow();
+
+    // modo "ventana pegada a la imagen": ajustar la ventana a esta imagen
+    if (g.cfg.fitWindow) applyWindowSizing(g.firstSize);
+    g.firstSize = false;
 
     // titulo de ventana (accesibilidad / barra de tareas)
     std::wstring title = baseName(path) + L"  —  Lux";
@@ -380,6 +470,39 @@ static void toggleFitDetail(float cx, float cy) {
     }
 }
 
+// Ajusta la ventana al tamaño de la imagen actual (modo "ventana pegada"),
+// limitada al area de trabajo del monitor. recenter=true la centra; si no,
+// conserva el centro actual (continuidad al navegar).
+static void applyWindowSizing(bool recenter) {
+    if (!g.cfg.fitWindow || !g.hwnd) return;
+    if (g.fullscreen || IsZoomed(g.hwnd)) return;
+    if (!g.bmp || !g.imgW || !g.imgH) return;
+    MONITORINFO mi{ sizeof(mi) };
+    if (!GetMonitorInfo(MonitorFromWindow(g.hwnd, MONITOR_DEFAULTTONEAREST), &mi)) return;
+
+    int  workW = mi.rcWork.right - mi.rcWork.left;
+    int  workH = mi.rcWork.bottom - mi.rcWork.top;
+    int  tbh = dp(TBH_L);
+    double availW = workW - dpf(60.f);
+    double availH = workH - dpf(60.f) - tbh;
+    double s = std::min(1.0, std::min(availW / g.imgW, availH / g.imgH));
+    int winW = std::max(dp(420), (int)lround(g.imgW * s));
+    int winH = std::max(dp(280), (int)lround(g.imgH * s) + tbh);
+
+    int cx, cy;
+    if (recenter) {
+        cx = (mi.rcWork.left + mi.rcWork.right) / 2;
+        cy = (mi.rcWork.top + mi.rcWork.bottom) / 2;
+    } else {
+        RECT r; GetWindowRect(g.hwnd, &r);
+        cx = (r.left + r.right) / 2; cy = (r.top + r.bottom) / 2;
+    }
+    int x = cx - winW / 2, y = cy - winH / 2;
+    x = std::max((int)mi.rcWork.left, std::min(x, (int)mi.rcWork.right - winW));
+    y = std::max((int)mi.rcWork.top,  std::min(y, (int)mi.rcWork.bottom - winH));
+    SetWindowPos(g.hwnd, nullptr, x, y, winW, winH, SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
 // ---------------------------------------------------------------------------
 //  Recursos Direct2D
 // ---------------------------------------------------------------------------
@@ -440,16 +563,18 @@ static bool createDeviceResources() {
 // ---------------------------------------------------------------------------
 //  Layout de los botones de la barra
 // ---------------------------------------------------------------------------
-static void btnRect(int i, D2D1_RECT_F& r) {  // 0 min,1 max,2 close (de izq a der)
+// indices: 0=min 1=max 2=close (cluster derecho) ; 3=toggle "pegar a la imagen" (a su izquierda)
+static void btnRect(int i, D2D1_RECT_F& r) {
     RECT rc; GetClientRect(g.hwnd, &rc);
     float bw = (float)dp(BTNW_L), h = (float)dp(TBH_L);
     float right = (float)rc.right;
+    if (i == 3) { r = D2D1::RectF(right - bw * 4, 0, right - bw * 3, h); return; }
     r = D2D1::RectF(right - bw * (3 - i), 0, right - bw * (2 - i), h);
 }
 static int hitButton(int x, int y) {
     if (g.fullscreen) return -1;
     if (y >= dp(TBH_L)) return -1;
-    for (int i = 0; i < 3; ++i) { D2D1_RECT_F r; btnRect(i, r);
+    for (int i = 0; i <= 3; ++i) { D2D1_RECT_F r; btnRect(i, r);
         if (x >= r.left && x < r.right && y >= r.top && y < r.bottom) return i; }
     return -1;
 }
@@ -474,7 +599,7 @@ static void drawWindowButtons() {
     float a = g.chrome;
     if (a <= 0.01f) return;
     float h = (float)dp(TBH_L);
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i <= 3; ++i) {
         D2D1_RECT_F r; btnRect(i, r);
         bool hot = (g.hoverBtn == i);
         if (hot) {
@@ -483,10 +608,22 @@ static void drawWindowButtons() {
             setBrush(hc, a);
             g.rt->FillRectangle(r, g.brush.Get());
         }
-        D2D1_COLOR_F ic = hot ? (i == 2 ? col::danger : col::fg) : col::fgDim;
-        setBrush(ic, a);
         float cx = (r.left + r.right) * 0.5f, cy = h * 0.5f;
         float s = dpf(5.0f), sw = dpf(1.1f);
+        if (i == 3) {            // toggle "ventana pegada a la imagen": marco con imagen adentro
+            bool on = g.cfg.fitWindow;
+            D2D1_COLOR_F tc = on ? col::accent : (hot ? col::fg : col::fgDim);
+            float bw = dpf(6.5f), bh = dpf(5.2f);
+            D2D1_RECT_F frame = D2D1::RectF(cx - bw, cy - bh, cx + bw, cy + bh);
+            setBrush(tc, a);
+            g.rt->DrawRectangle(frame, g.brush.Get(), sw);
+            float pad = dpf(1.8f);
+            setBrush(tc, on ? a * 0.85f : a * 0.28f);
+            g.rt->FillRectangle(D2D1::RectF(frame.left+pad, frame.top+pad, frame.right-pad, frame.bottom-pad), g.brush.Get());
+            continue;
+        }
+        D2D1_COLOR_F ic = hot ? (i == 2 ? col::danger : col::fg) : col::fgDim;
+        setBrush(ic, a);
         if (i == 0) {            // minimizar: linea
             g.rt->DrawLine(D2D1::Point2F(cx - s, cy), D2D1::Point2F(cx + s, cy), g.brush.Get(), sw);
         } else if (i == 1) {     // maximizar/restaurar: cuadrado(s)
@@ -910,6 +1047,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (hb == 0) ShowWindow(hwnd, SW_MINIMIZE);
             else if (hb == 1) ShowWindow(hwnd, IsZoomed(hwnd) ? SW_RESTORE : SW_MAXIMIZE);
             else if (hb == 2) PostMessage(hwnd, WM_CLOSE, 0, 0);
+            else if (hb == 3) {   // toggle "ventana pegada a la imagen"
+                g.cfg.fitWindow = !g.cfg.fitWindow;
+                if (g.cfg.fitWindow) applyWindowSizing(true);
+                saveConfig();
+            }
             else {
                 int he = hitEdge(x, y);
                 if (he == -1) navigate(-1);
@@ -952,6 +1094,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case 'F': case VK_F11: setFullscreen(!g.fullscreen); break;
         case VK_ESCAPE: if (g.fullscreen) setFullscreen(false); else PostMessage(hwnd, WM_CLOSE,0,0); break;
         case 'O': if (ctrl) openDialog(); break;
+        case 'W':   // alternar "ventana pegada a la imagen"
+            g.cfg.fitWindow = !g.cfg.fitWindow;
+            if (g.cfg.fitWindow) applyWindowSizing(false);
+            saveConfig(); invalidate();
+            break;
         }
         return 0;
     }
@@ -965,6 +1112,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_TIMER:
         if (wp == IDT_ANIM) animTick();
+        return 0;
+
+    case WM_CLOSE:
+        saveConfig();          // recordar geometria + preferencia al cerrar
+        DestroyWindow(hwnd);
         return 0;
 
     case WM_DESTROY:
@@ -1000,20 +1152,26 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     wc.hIconSm = LoadIconW(hInst, MAKEINTRESOURCEW(1));
     RegisterClassExW(&wc);
 
+    // cargar configuracion antes de crear la ventana
+    loadConfig();
+
+    // geometria inicial: en modo manual restauramos tamaño/posicion guardados
+    int X = CW_USEDEFAULT, Y = CW_USEDEFAULT, W = 1100, H = 720;
+    if (!g.cfg.fitWindow && g.cfg.hasWin) { X = g.cfg.winX; Y = g.cfg.winY; W = g.cfg.winW; H = g.cfg.winH; }
+
     HWND hwnd = CreateWindowExW(0, L"LuxWindow", L"Lux",
-        WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 1100, 720,
+        WS_OVERLAPPEDWINDOW, X, Y, W, H,
         nullptr, nullptr, hInst, nullptr);
     if (!hwnd) return 1;
 
     // forzar el recalculo del marco -> aplica el frameless (WM_NCCALCSIZE)
     SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
         SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-    ShowWindow(hwnd, nCmdShow);
 
     // crear los recursos Direct2D ANTES de decodificar (decode necesita el render target)
     createDeviceResources();
 
-    // abrir el archivo pasado por linea de comandos
+    // abrir el archivo pasado por linea de comandos (ajusta la ventana si el modo esta activo)
     int argc = 0; LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     if (argv && argc > 1) {
         buildFolderList(argv[1]);
@@ -1021,6 +1179,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     }
     if (argv) LocalFree(argv);
 
+    // mostrar (maximizada si asi se guardo)
+    ShowWindow(hwnd, g.cfg.maximized ? SW_MAXIMIZE : nCmdShow);
     UpdateWindow(hwnd);
 
     MSG msg;
