@@ -1,0 +1,14 @@
+# Intermedios de compilación MSVC
+*.obj
+*.res
+*.exp
+*.lib
+*.pdb
+*.ilk
+
+# Desarrollo / pruebas (no se publica)
+_dev/
+
+# Varios
+*.log
+Thumbs.db
