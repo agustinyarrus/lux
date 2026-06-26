@@ -40,6 +40,7 @@ Y los que WIC no trae, por **stb_image** integrado:
 
 ## 🎛️ Características
 
+- **Ventana pegada a la imagen** o **tamaño libre**: un toggle en la barra de título (o la tecla `W`) elige si cada imagen ajusta la ventana a su tamaño, o si conservás el tuyo. La preferencia y el tamaño/posición se **recuerdan entre sesiones**.
 - **Render Direct2D** con interpolación bicúbica de alta calidad al reducir y _nearest_ al hacer pixel-peeping (≥300 %).
 - **Zoom al cursor** con la rueda, paneo al arrastrar, doble clic para alternar ajuste ↔ 100 %.
 - **Fondo _ambient_**: una versión desenfocada de la imagen llena el escenario (efecto Gaussian de D2D).
@@ -61,6 +62,23 @@ Y los que WIC no trae, por **stb_image** integrado:
 | `F` / `F11`                 | Pantalla completa              |
 | `Esc`                       | Salir de pantalla completa / cerrar |
 | `Ctrl O`                    | Abrir                          |
+| `W`                         | Ventana pegada a la imagen (on/off) |
+
+## ⚙️ Configuración
+
+Lux guarda sus preferencias en **`%APPDATA%\Lux\config.json`** (se crea solo). Lo podés editar a mano o usar el toggle de la barra de título (el ícono de marco, se pone azul cuando está activo):
+
+```json
+{
+  "fitWindowToImage": false,
+  "maximized": false,
+  "winX": 100, "winY": 100,
+  "winW": 1100, "winH": 720
+}
+```
+
+- **`fitWindowToImage: true`** — al abrir o navegar, la ventana toma el tamaño de la imagen (limitada al monitor) y la muestra a 100 %. Es la opción "ventana pegada".
+- **`fitWindowToImage: false`** — la ventana conserva el tamaño y la posición que vos le des; se recuerdan entre sesiones (`winX/Y/W/H`, `maximized`).
 
 ## 📦 Compilar
 
