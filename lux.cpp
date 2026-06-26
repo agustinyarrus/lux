@@ -71,8 +71,8 @@ namespace col {
 }
 
 // metricas logicas (a 96 dpi); se escalan por g.dpi
-static const int TBH_L   = 38;   // alto barra de titulo
-static const int BTNW_L  = 46;   // ancho de cada boton de ventana
+static const int TBH_L   = 26;   // alto barra de titulo (extra fina)
+static const int BTNW_L  = 36;   // ancho de cada boton de ventana
 static const int RSZ_L   = 6;    // borde de resize (hit-test)
 static const UINT IDT_ANIM = 1;  // timer de animacion del cromo
 
@@ -512,7 +512,7 @@ static void createTextFormats() {
             DWRITE_FONT_STRETCH_NORMAL, px, L"", out);
     };
     g.tfCap.Reset(); g.tfHud.Reset(); g.tfTitle.Reset(); g.tfHint.Reset();
-    mk(dpf(12.0f), DWRITE_FONT_WEIGHT_LIGHT, &g.tfCap);
+    mk(dpf(10.0f), DWRITE_FONT_WEIGHT_LIGHT, &g.tfCap);
     mk(dpf(11.5f), DWRITE_FONT_WEIGHT_LIGHT, &g.tfHud);
     mk(dpf(13.5f), DWRITE_FONT_WEIGHT_LIGHT, &g.tfTitle);
     mk(dpf(11.0f), DWRITE_FONT_WEIGHT_LIGHT, &g.tfHint);
@@ -609,11 +609,11 @@ static void drawWindowButtons() {
             g.rt->FillRectangle(r, g.brush.Get());
         }
         float cx = (r.left + r.right) * 0.5f, cy = h * 0.5f;
-        float s = dpf(5.0f), sw = dpf(1.1f);
+        float s = dpf(3.7f), sw = dpf(1.0f);
         if (i == 3) {            // toggle "ventana pegada a la imagen": marco con imagen adentro
             bool on = g.cfg.fitWindow;
             D2D1_COLOR_F tc = on ? col::accent : (hot ? col::fg : col::fgDim);
-            float bw = dpf(6.5f), bh = dpf(5.2f);
+            float bw = dpf(5.0f), bh = dpf(3.9f);
             D2D1_RECT_F frame = D2D1::RectF(cx - bw, cy - bh, cx + bw, cy + bh);
             setBrush(tc, a);
             g.rt->DrawRectangle(frame, g.brush.Get(), sw);
