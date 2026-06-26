@@ -12,3 +12,6 @@ _dev/
 # Varios
 *.log
 Thumbs.db
+
+# instaladores compilados (van al Release)
+dist/
