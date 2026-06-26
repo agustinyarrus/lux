@@ -45,6 +45,16 @@
 #define QOI_IMPLEMENTATION
 #include "third_party/qoi.h"
 
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "third_party/stb_image_write.h"   // provee stbi_zlib_compress para tinyexr
+
+#define TINYEXR_USE_MINIZ 0
+#define TINYEXR_USE_STB_ZLIB 1             // reusa el zlib de stb (sin miniz)
+#define TINYEXR_IMPLEMENTATION
+#include "third_party/tinyexr.h"
+
+#include "third_party/exotic.h"            // pcx, farbfeld, pfm, sun, sgi, wbmp, pam, xbm
+
 #pragma comment(lib, "d2d1.lib")
 #pragma comment(lib, "dwrite.lib")
 #pragma comment(lib, "windowscodecs.lib")
@@ -276,7 +286,10 @@ static bool isImageExt(const std::wstring& e) {
         // stb
         L"tga",L"targa",L"hdr",L"pic",L"ppm",L"pgm",L"pbm",L"pnm",L"psd",
         // decoders propios (header-only)
-        L"svg",L"qoi",
+        L"svg",L"qoi",L"exr",
+        // exóticos (exotic.h)
+        L"pcx",L"pfm",L"ff",L"farbfeld",L"ras",L"sun",L"sgi",L"rgb",L"rgba",L"bw",
+        L"int",L"inta",L"wbmp",L"pam",L"xbm",L"im1",L"im8",L"im24",L"im32",
     };
     for (auto* x : exts) if (e == x) return true;
     return false;
@@ -440,18 +453,67 @@ static bool decodeQOI(const std::wstring& path, ComPtr<ID2D1Bitmap>& out, UINT& 
     return ok;
 }
 
+// EXR (OpenEXR HDR via tinyexr): float RGBA -> 8 bit con tone-map (normaliza por el max).
+static bool decodeEXR(const std::wstring& path, ComPtr<ID2D1Bitmap>& out, UINT& ow, UINT& oh) {
+    if (!g.rt) return false;
+    std::vector<unsigned char> buf;
+    if (!readFileBytes(path, buf)) return false;
+    float* rgba = nullptr; int w = 0, h = 0; const char* err = nullptr;
+    if (LoadEXRFromMemory(&rgba, &w, &h, buf.data(), buf.size(), &err) != TINYEXR_SUCCESS || !rgba) {
+        if (err) FreeEXRErrorMessage(err);
+        return false;
+    }
+    size_t px = (size_t)w * h;
+    float mx = 0; for (size_t i = 0; i < px; ++i) for (int c = 0; c < 3; ++c) { float v = rgba[i*4+c]; if (v > mx && v < 1e30f) mx = v; }
+    float scale = (mx > 1.0f) ? 1.0f / mx : 1.0f;
+    std::vector<unsigned char> p8(px * 4);
+    for (size_t i = 0; i < px; ++i) {
+        p8[i*4+0] = ex_tm(rgba[i*4+0], scale);
+        p8[i*4+1] = ex_tm(rgba[i*4+1], scale);
+        p8[i*4+2] = ex_tm(rgba[i*4+2], scale);
+        int a = (int)(rgba[i*4+3] * 255.0f + 0.5f);
+        p8[i*4+3] = (unsigned char)(a < 0 ? 0 : (a > 255 ? 255 : a));
+    }
+    free(rgba);
+    if (!bitmapFromRGBA(p8.data(), (UINT)w, (UINT)h, out)) return false;
+    ow = (UINT)w; oh = (UINT)h; return true;
+}
+
+// Formatos exóticos (exotic.h) que despachan por extensión + magic.
+static bool isExoticExt(const std::wstring& e) {
+    return e==L"pcx"||e==L"pfm"||e==L"ras"||e==L"sun"||e==L"sgi"||e==L"rgb"||e==L"rgba"||
+           e==L"bw"||e==L"int"||e==L"inta"||e==L"wbmp"||e==L"pam"||e==L"xbm"||e==L"ff"||
+           e==L"farbfeld"||e==L"im1"||e==L"im8"||e==L"im24"||e==L"im32";
+}
+static bool decodeExotic(const std::wstring& path, ComPtr<ID2D1Bitmap>& out, UINT& ow, UINT& oh) {
+    if (!g.rt) return false;
+    std::vector<unsigned char> buf;
+    if (!readFileBytes(path, buf)) return false;
+    std::string ext = toUtf8(extOf(path));
+    int w = 0, h = 0;
+    unsigned char* px = exotic_load(buf.data(), buf.size(), ext.c_str(), &w, &h);
+    if (!px) return false;
+    bool ok = bitmapFromRGBA(px, (UINT)w, (UINT)h, out);
+    free(px);
+    if (ok) { ow = (UINT)w; oh = (UINT)h; }
+    return ok;
+}
+
 // Cadena unica: elige decoder por extension y cae a otros si falla.
 static bool decodeAny(const std::wstring& path, ComPtr<ID2D1Bitmap>& bmp, UINT& w, UINT& h) {
     std::wstring e = extOf(path);
     if (e == L"svg") return decodeSVG(path, bmp, w, h);
     if (e == L"qoi") return decodeQOI(path, bmp, w, h);
+    if (e == L"exr") return decodeEXR(path, bmp, w, h);
+    if (isExoticExt(e)) return decodeExotic(path, bmp, w, h);
     if (prefersStb(e)) {
         if (decodeSTB(path, bmp, w, h)) return true;
         return decodeWIC(path, bmp, w, h);
     }
     if (decodeWIC(path, bmp, w, h)) return true;
     if (decodeSTB(path, bmp, w, h)) return true;
-    return decodeQOI(path, bmp, w, h);   // QOI valida su firma: seguro como ultimo recurso
+    if (decodeQOI(path, bmp, w, h)) return true;   // QOI valida su firma
+    return decodeExotic(path, bmp, w, h);          // exotic_load valida por magic
 }
 
 static void fitToWindow();                     // fwd
@@ -997,8 +1059,8 @@ static void openDialog() {
     OPENFILENAMEW ofn{ sizeof(ofn) };
     ofn.hwndOwner = g.hwnd;
     ofn.lpstrFilter =
-        L"Imágenes\0*.jpg;*.jpeg;*.png;*.gif;*.bmp;*.tif;*.tiff;*.webp;*.heic;*.heif;*.avif;*.jxl;*.svg;*.qoi;"
-        L"*.ico;*.tga;*.hdr;*.ppm;*.pgm;*.pbm;*.pnm;*.psd;*.dds;*.jxr;*.dng;*.cr2;*.nef;*.arw\0"
+        L"Imágenes\0*.jpg;*.jpeg;*.png;*.gif;*.bmp;*.tif;*.tiff;*.webp;*.heic;*.heif;*.avif;*.jxl;*.svg;*.qoi;*.exr;"
+        L"*.ico;*.tga;*.hdr;*.dds;*.jxr;*.ppm;*.pgm;*.pbm;*.pnm;*.pam;*.psd;*.pcx;*.pfm;*.ras;*.sgi;*.rgb;*.bw;*.wbmp;*.xbm;*.ff;*.dng;*.cr2;*.nef;*.arw\0"
         L"Todos\0*.*\0\0";
     ofn.lpstrFile = file; ofn.nMaxFile = MAX_PATH;
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER;
