@@ -12,6 +12,9 @@ Win32 puro + Direct2D + WIC. Sin frameworks, sin runtime, sin dependencias. Un s
 ![Size](https://img.shields.io/badge/exe-~360%20KB-9ECE6A)
 ![License](https://img.shields.io/badge/License-MIT-9ECE6A)
 
+[![Descargar](https://img.shields.io/badge/Descargar-Setup_%2B_Portable-7AA2F7?style=for-the-badge&logo=github&logoColor=white)](https://github.com/agustinyarrus/lux/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/agustinyarrus/lux/total?style=for-the-badge&color=9ECE6A&label=descargas)](https://github.com/agustinyarrus/lux/releases)
+
 <img src="docs/screenshot.png" alt="Lux" width="820">
 
 </div>
