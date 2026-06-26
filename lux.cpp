@@ -75,7 +75,7 @@ static const int TBH_L   = 26;   // alto barra de titulo (extra fina)
 static const int BTNW_L  = 36;   // ancho de cada boton de ventana
 static const int RSZ_L   = 6;    // borde de resize (hit-test)
 static const UINT IDT_ANIM = 1;  // timer de animacion del cromo
-static const UINT IDT_HUD  = 2;  // timer del HUD (resolucion/zoom): auto-hide a los 5 s
+static const UINT IDT_HUD  = 2;  // timer del HUD (resolucion/zoom): auto-hide a los 3 s
 
 // ---------------------------------------------------------------------------
 //  Configuracion persistente (%APPDATA%\Lux\config.json)
@@ -134,7 +134,7 @@ struct State {
     int   hoverBtn = -1;     // 0=min 1=max 2=close
     int   hoverEdge = 0;     // -1 prev, +1 next, 0 ninguno
 
-    // HUD de resolucion/zoom: ciclo de vida propio (se oculta 5 s tras el ultimo cambio de zoom)
+    // HUD de resolucion/zoom: ciclo de vida propio (se oculta 3 s tras el ultimo cambio de zoom)
     DWORD hudShownAt = 0;
     float hudAlpha = 0.f;
     float hudTarget = 0.f;
@@ -368,7 +368,7 @@ static void fitToWindow();                     // fwd
 static void applyWindowSizing(bool recenter);  // fwd
 static void invalidate()     { if (g.hwnd) InvalidateRect(g.hwnd, nullptr, FALSE); }
 
-// Muestra el HUD (resolucion + zoom) al instante y reinicia su cuenta de 5 s.
+// Muestra el HUD (resolucion + zoom) al instante y reinicia su cuenta de 3 s.
 static void showHud() {
     g.hudShownAt = GetTickCount();
     g.hudTarget  = 1.f;
@@ -691,7 +691,7 @@ static void drawChevron(float cx, float cy, int dir, float a) {
 
 static void drawHud() {
     if (!g.bmp || g.fullscreen) return;
-    float a = g.hudAlpha * 0.8f;   // opacidad propia del HUD + 20% mas transparente
+    float a = g.hudAlpha * 0.9f;   // opacidad propia del HUD + 10% mas transparente
     if (a <= 0.01f || !g.tfHud) return;
     wchar_t buf[128];
     int zoomPct = (int)lround(g.scale * 100.0);
@@ -916,10 +916,10 @@ static void animTick() {
         KillTimer(g.hwnd, IDT_ANIM);
 }
 
-// HUD (resolucion/zoom): se desvanece a los 5 s del ultimo cambio de zoom.
+// HUD (resolucion/zoom): se desvanece a los 3 s del ultimo cambio de zoom.
 static void hudTick() {
     bool changed = false;
-    if (g.hudTarget > 0.f && (GetTickCount() - g.hudShownAt) > 5000) g.hudTarget = 0.f;
+    if (g.hudTarget > 0.f && (GetTickCount() - g.hudShownAt) > 3000) g.hudTarget = 0.f;
     float d = g.hudTarget - g.hudAlpha;
     if (fabs(d) > 0.004f) { g.hudAlpha += d * 0.12f; changed = true; }
     else if (g.hudAlpha != g.hudTarget) { g.hudAlpha = g.hudTarget; changed = true; }
