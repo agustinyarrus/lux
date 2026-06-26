@@ -139,6 +139,12 @@ struct State {
     float hudAlpha = 0.f;
     float hudTarget = 0.f;
 
+    // caption con truncado (…) cacheado para no medir texto en cada frame
+    std::wstring capText, capKeyPath;
+    int  capKeyIdx = -2, capKeyTotal = -1;
+    LONG capKeyW = -1;
+    UINT capKeyDpi = 0;
+
     // ventana
     bool  fullscreen = false;
     WINDOWPLACEMENT prevPlace{ sizeof(WINDOWPLACEMENT) };
@@ -532,10 +538,19 @@ static void createTextFormats() {
     mk(dpf(11.5f), DWRITE_FONT_WEIGHT_LIGHT, &g.tfHud);
     mk(dpf(13.5f), DWRITE_FONT_WEIGHT_LIGHT, &g.tfTitle);
     mk(dpf(11.0f), DWRITE_FONT_WEIGHT_LIGHT, &g.tfHint);
-    if (g.tfCap)  { g.tfCap->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);  g.tfCap->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER); }
+    if (g.tfCap)  {
+        g.tfCap->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+        g.tfCap->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        g.tfCap->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);   // una sola linea (no se parte en dos)
+        DWRITE_TRIMMING trim = { DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0 };
+        ComPtr<IDWriteInlineObject> sign;
+        if (SUCCEEDED(g.dw->CreateEllipsisTrimmingSign(g.tfCap.Get(), &sign)))
+            g.tfCap->SetTrimming(&trim, sign.Get());            // fallback: … si aun no entra
+    }
     if (g.tfHud)  { g.tfHud->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);  g.tfHud->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER); }
     if (g.tfTitle){ g.tfTitle->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);g.tfTitle->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER); }
     if (g.tfHint) { g.tfHint->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER); g.tfHint->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER); }
+    g.capKeyW = -1;   // forzar recalculo del caption con el nuevo formato
 }
 
 static void discardDeviceResources() {
@@ -658,6 +673,36 @@ static void drawWindowButtons() {
     }
 }
 
+// Mide el ancho (px) de un texto con el formato del caption.
+static float measureCapW(const std::wstring& s) {
+    if (s.empty() || !g.dw || !g.tfCap) return 0.f;
+    ComPtr<IDWriteTextLayout> tl;
+    if (FAILED(g.dw->CreateTextLayout(s.c_str(), (UINT32)s.size(), g.tfCap.Get(), 100000.f, 100.f, &tl)))
+        return 0.f;
+    DWRITE_TEXT_METRICS m{}; tl->GetMetrics(&m);
+    return m.widthIncludingTrailingWhitespace;
+}
+
+// Arma "nombre   ·   idx / total" truncando SOLO el nombre con … si no entra en la barra
+// (el contador queda siempre visible). El ancho disponible es simetrico para centrar en la ventana.
+static std::wstring buildCaption(LONG winW) {
+    std::wstring name = baseName(g.imgPath);
+    std::wstring tail = L"   ·   " + std::to_wstring(g.idx + 1) + L" / " + std::to_wstring(g.files.size());
+    if (!g.tfCap) return name + tail;
+    float btnsW = (float)dp(BTNW_L) * 4.f;                 // 4 botones a la derecha
+    float avail = (float)winW - 2.f * (btnsW + dpf(14.f)); // margen simetrico (no choca botones)
+    if (avail < dpf(140.f)) avail = (float)winW * 0.6f;    // ventana muy angosta
+    float nameAvail = avail - measureCapW(tail);
+    if (nameAvail <= dpf(26.f) || measureCapW(name) <= nameAvail) return name + tail;
+    const std::wstring ell = L"…";                    // …
+    size_t lo = 0, hi = name.size();                       // mayor prefijo del nombre que entra
+    while (lo < hi) {
+        size_t mid = (lo + hi + 1) / 2;
+        if (measureCapW(name.substr(0, mid) + ell) <= nameAvail) lo = mid; else hi = mid - 1;
+    }
+    return name.substr(0, lo) + ell + tail;
+}
+
 static void drawTitleBar() {
     if (g.fullscreen) return;
     float a = g.chrome;
@@ -667,14 +712,17 @@ static void drawTitleBar() {
     setBrush(col::bg, 1.f);
     g.rt->FillRectangle(D2D1::RectF(0, 0, (float)rc.right, h), g.brush.Get());
 
-    // caption centrado: nombre  ·  idx / total
+    // caption centrado: nombre  ·  idx / total  (nombre truncado con … si es largo)
     if (g.bmp && a > 0.01f && g.tfCap) {
-        std::wstring name = baseName(g.imgPath);
-        std::wstring count = std::to_wstring(g.idx + 1) + L" / " + std::to_wstring(g.files.size());
-        std::wstring cap = name + L"   ·   " + count;
+        if (g.imgPath != g.capKeyPath || g.idx != g.capKeyIdx ||
+            (int)g.files.size() != g.capKeyTotal || rc.right != g.capKeyW || g.dpi != g.capKeyDpi) {
+            g.capKeyPath = g.imgPath; g.capKeyIdx = g.idx; g.capKeyTotal = (int)g.files.size();
+            g.capKeyW = rc.right; g.capKeyDpi = g.dpi;
+            g.capText = buildCaption(rc.right);
+        }
         setBrush(col::fgDim, a);
-        D2D1_RECT_F tr = D2D1::RectF((float)rc.right*0.25f, 0, (float)rc.right*0.75f, h);
-        g.rt->DrawTextW(cap.c_str(), (UINT32)cap.size(), g.tfCap.Get(), tr, g.brush.Get(),
+        D2D1_RECT_F tr = D2D1::RectF(0, 0, (float)rc.right, h);
+        g.rt->DrawTextW(g.capText.c_str(), (UINT32)g.capText.size(), g.tfCap.Get(), tr, g.brush.Get(),
             D2D1_DRAW_TEXT_OPTIONS_CLIP);
     }
     drawWindowButtons();
