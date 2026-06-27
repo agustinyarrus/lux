@@ -126,6 +126,8 @@ struct State {
     // imagen actual
     ComPtr<ID2D1Bitmap>          bmp;
     UINT  imgW = 0, imgH = 0;
+    UINT  imgBpp = 0;        // bits por pixel del formato de origen (0 = desconocido)
+    bool  imgAlpha = false;  // el formato de origen soporta canal alfa
     std::wstring imgPath;
     std::wstring fmtLabel;   // p.ej. "JPEG", "PNG"
 
@@ -411,6 +413,18 @@ static bool decodeWIC(const std::wstring& path, ComPtr<ID2D1Bitmap>& out, UINT& 
     ComPtr<IWICBitmapFrameDecode> frame;
     if (FAILED(dec->GetFrame(idx, &frame))) return false;
 
+    // metadata del formato de origen para la barra de estado: bits por pixel + alfa
+    WICPixelFormatGUID pf{};
+    if (SUCCEEDED(frame->GetPixelFormat(&pf))) {
+        ComPtr<IWICComponentInfo> ci;
+        if (SUCCEEDED(g.wic->CreateComponentInfo(pf, &ci))) {
+            ComPtr<IWICPixelFormatInfo> pfi;
+            if (SUCCEEDED(ci.As(&pfi))) { UINT bpp = 0; if (SUCCEEDED(pfi->GetBitsPerPixel(&bpp))) g.imgBpp = bpp; }
+            ComPtr<IWICPixelFormatInfo2> pfi2;
+            if (SUCCEEDED(ci.As(&pfi2))) { BOOL tr = FALSE; if (SUCCEEDED(pfi2->SupportsTransparency(&tr))) g.imgAlpha = (tr != FALSE); }
+        }
+    }
+
     ComPtr<IWICFormatConverter> conv;
     if (FAILED(g.wic->CreateFormatConverter(&conv))) return false;
     if (FAILED(conv->Initialize(frame.Get(), GUID_WICPixelFormat32bppPBGRA,
@@ -555,6 +569,7 @@ static bool loadIndex(int i) {
     const std::wstring& path = g.files[i];
     std::wstring e = extOf(path);
 
+    g.imgBpp = 0; g.imgAlpha = false;   // los setea el decoder (WIC); reset por si no aplica
     ComPtr<ID2D1Bitmap> bmp; UINT w = 0, h = 0;
     if (!decodeAny(path, bmp, w, h)) return false;
     g.loadError.clear();
@@ -857,16 +872,33 @@ static std::wstring humanSize(UINT64 b) {
     else                             swprintf(buf, 32, L"%llu B", (unsigned long long)b);
     return buf;
 }
-// Tamaño del archivo actual, cacheado por ruta (evita stat en cada frame).
-static UINT64 fileSizeCached(const std::wstring& path) {
-    static std::wstring cachedPath; static UINT64 cachedSize = 0;
+// Tamaño + fecha de modificación del archivo actual, cacheados por ruta (evita stat por frame).
+struct FileMeta { UINT64 size = 0; std::wstring mdate; };
+static const FileMeta& fileMetaCached(const std::wstring& path) {
+    static std::wstring cachedPath; static FileMeta fm;
     if (path != cachedPath) {
-        cachedPath = path; cachedSize = 0;
+        cachedPath = path; fm = FileMeta{};
         WIN32_FILE_ATTRIBUTE_DATA fad{};
-        if (!path.empty() && GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fad))
-            cachedSize = ((UINT64)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
+        if (!path.empty() && GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fad)) {
+            fm.size = ((UINT64)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
+            FILETIME lt; SYSTEMTIME st;
+            if (FileTimeToLocalFileTime(&fad.ftLastWriteTime, &lt) && FileTimeToSystemTime(&lt, &st)) {
+                wchar_t b[16]; swprintf(b, 16, L"%04d-%02d-%02d", st.wYear, st.wMonth, st.wDay);
+                fm.mdate = b;
+            }
+        }
     }
-    return cachedSize;
+    return fm;
+}
+
+// Relación de aspecto: "16:9", "4:3"… reduciendo por MCD; decimal si no reduce lindo.
+static std::wstring aspectRatio(UINT w, UINT h) {
+    if (!w || !h) return L"";
+    UINT a = w, b = h; while (b) { UINT t = a % b; a = b; b = t; }   // gcd
+    UINT rw = w / a, rh = h / a;
+    if (rw <= 64 && rh <= 64) return std::to_wstring(rw) + L":" + std::to_wstring(rh);
+    wchar_t buf[24]; swprintf(buf, 24, L"%.2f:1", (double)w / (double)h);
+    return buf;
 }
 
 // Arma "nombre   ·   idx / total" truncando SOLO el nombre con … si no entra en la barra
@@ -984,15 +1016,28 @@ static void drawStatusBar() {
     g.rt->DrawTextW(zoom.c_str(), (UINT32)zoom.size(), g.tfStatus.Get(), zr, g.brush.Get(),
                     D2D1_DRAW_TEXT_OPTIONS_CLIP);
 
-    // izquierda: FORMATO · ancho × alto · megapixeles · peso
+    // izquierda: cadena de datos de la imagen, unidos por " · " (los vacios se omiten)
+    const std::wstring sep = L"   ·   ";
     std::wstring fmt = g.fmtLabel;
     if (fmt.empty()) { fmt = extOf(g.imgPath); for (auto& c : fmt) c = (wchar_t)towupper(c); }
-    const std::wstring sep = L"   ·   ";
-    std::wstring left = fmt + sep + std::to_wstring(g.imgW) + L" × " + std::to_wstring(g.imgH);
-    double mp = (double)g.imgW * (double)g.imgH / 1e6;
-    if (mp >= 1.0) { wchar_t mb[24]; swprintf(mb, 24, L"%.1f MP", mp); left += sep + mb; }
-    UINT64 bytes = fileSizeCached(g.imgPath);
-    if (bytes) left += sep + humanSize(bytes);
+    const FileMeta& fm = fileMetaCached(g.imgPath);
+    UINT64 ramBytes = (UINT64)g.imgW * (UINT64)g.imgH * 4ull;   // descomprimido a RGBA8
+
+    std::vector<std::wstring> seg;
+    seg.push_back(fmt);                                                           // formato
+    seg.push_back(std::to_wstring(g.imgW) + L" × " + std::to_wstring(g.imgH));     // dimensiones
+    { double mp = (double)g.imgW * (double)g.imgH / 1e6; wchar_t b[24];
+      swprintf(b, 24, mp >= 1.0 ? L"%.1f MP" : L"%.2f MP", mp); seg.push_back(b); }   // megapixeles
+    { std::wstring ar = aspectRatio(g.imgW, g.imgH); if (!ar.empty()) seg.push_back(ar); }  // relacion de aspecto
+    if (g.imgBpp) { std::wstring d = std::to_wstring(g.imgBpp) + L"-bit"; if (g.imgAlpha) d += L" alfa"; seg.push_back(d); } // profundidad + alfa
+    if (fm.size)  seg.push_back(humanSize(fm.size));                              // peso en disco
+    seg.push_back(humanSize(ramBytes) + L" en RAM");                             // tamaño descomprimido
+    if (fm.size) { double r = (double)ramBytes / (double)fm.size;
+      if (r >= 1.5) { wchar_t b[24]; swprintf(b, 24, L"%.0f:1", r); seg.push_back(b); } }   // ratio de compresion
+    if (!fm.mdate.empty()) seg.push_back(fm.mdate);                              // fecha de modificacion
+
+    std::wstring left;
+    for (size_t i = 0; i < seg.size(); ++i) { if (i) left += sep; left += seg[i]; }
 
     setBrush(col::fgDim, a);
     D2D1_RECT_F lr = D2D1::RectF(padX, top, (float)rc.right - padX - zw - dpf(18.f), (float)rc.bottom);
