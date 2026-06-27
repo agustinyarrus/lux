@@ -1,5 +1,9 @@
-# gen-icon.ps1 - genera lux.ico (squircle azul-noche + sparkle de luz).
+# gen-icon.ps1 - genera el squircle azul-noche + sparkle (icono ORIGINAL de Lux).
 # Correr con Windows PowerShell 5.1:  powershell -NoProfile -File .\gen-icon.ps1
+#
+# OJO: el repo ya trae iconos curados -> lux.ico (icono de la app) y lux-file.ico (icono de
+#      los archivos asociados). Este script SOBREESCRIBE lux.ico con el diseño generado;
+#      corrélo solo si querés volver al icono original.
 Add-Type -AssemblyName System.Drawing
 
 $ACC  = [Drawing.Color]::FromArgb(255,0x7A,0xA2,0xF7)  # accent Nocturne

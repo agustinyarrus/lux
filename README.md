@@ -94,11 +94,14 @@ Lux guarda sus preferencias en **`%APPDATA%\Lux\config.json`** (se crea solo). L
 > Requiere **Visual Studio 2022** (o Build Tools) con el _Desktop development with C++_ y el Windows 10/11 SDK.
 
 ```powershell
-.\gen-icon.ps1     # genera lux.ico (sparkle azul-noche). Correr con Windows PowerShell 5.1.
 .\build.ps1        # compila lux.exe (release, /O2 /MT, sin consola, con icono y manifest)
 .\build.ps1 -Run   # compila y abre una imagen de prueba
 .\build.ps1 -Dbg   # build con símbolos + consola para diagnóstico
 ```
+
+Los iconos son assets curados del repo: **`lux.ico`** (icono de la app, embebido en el `.exe`) y
+**`lux-file.ico`** (icono de los archivos asociados, vía el ProgID `Lux.Image`). El script opcional
+`.\gen-icon.ps1` regenera el sparkle azul-noche original y **sobreescribe `lux.ico`**.
 
 El resultado es un único **`lux.exe`** portable. Luego:
 
@@ -116,7 +119,8 @@ o asocialo en _Abrir con…_ y usalo como visor por defecto.
 | `third_party/`         | Decoders _header-only_: `stb_image`, `nanosvg` (SVG), `qoi`, `tinyexr` (EXR, reusa el zlib de stb), `exotic.h` (pcx/farbfeld/pfm/sun/sgi/wbmp/pam/xbm) |
 | `lux.manifest`         | DPI _per-monitor v2_, common controls, code page UTF-8                          |
 | `lux.rc`               | Icono + versión + manifest embebidos                                           |
-| `gen-icon.ps1`         | Genera `lux.ico` multi-resolución con System.Drawing                            |
+| `lux.ico` / `lux-file.ico` | Iconos curados (16→256, 32-bit): la app y los archivos asociados (ProgID `Lux.Image`) |
+| `gen-icon.ps1`         | Regenera el `lux.ico` original (squircle) con System.Drawing — opcional           |
 | `build.ps1`            | Localiza MSVC (vcvars) y compila con `cl` + `rc`                                |
 
 Toda la decodificación pasa por una cadena con _fallback_: los formatos típicos van por **WIC**

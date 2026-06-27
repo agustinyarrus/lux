@@ -54,9 +54,11 @@ $exeName   = 'lux.exe'
 $src       = $PSScriptRoot
 $scopeFlag = if ($Machine) { '-Machine' } else { '-PerUser' }
 
-$exts = @('jpg','jpeg','jpe','jfif','jif','png','gif','bmp','dib','ico','cur','tif','tiff',
-          'dds','jxr','wdp','hdp','webp','heic','heif','avif','jxl',
-          'tga','hdr','ppm','pgm','pbm','pnm','pic','psd')
+# Extensiones que Lux abre (misma lista que lux.iss / README).
+$exts = @('jpg','jpeg','jpe','jfif','png','apng','gif','bmp','dib','tif','tiff','ico','cur',
+          'dds','jxr','wdp','hdp','webp','heic','heif','avif','jxl','svg','qoi','exr',
+          'tga','hdr','pic','ppm','pgm','pbm','pnm','pam','psd','pcx','pfm','ras','sun',
+          'sgi','rgb','bw','wbmp','xbm','ff','dng','cr2','cr3','nef','arw','orf','rw2')
 
 $startMenu = Join-Path $startMenuDir "$AppName.lnk"
 $uninstKey = "$hive\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\$AppName"
@@ -69,6 +71,11 @@ if ($Uninstall) {
   Remove-Item $startMenu -Force -ErrorAction SilentlyContinue
   Remove-Item $uninstKey -Recurse -Force -ErrorAction SilentlyContinue
   Remove-Item $appsKey   -Recurse -Force -ErrorAction SilentlyContinue
+  Remove-Item "$hive\SOFTWARE\Classes\Lux.Image" -Recurse -Force -ErrorAction SilentlyContinue
+  foreach ($e in $exts) {
+    $owp = "$hive\SOFTWARE\Classes\.$e\OpenWithProgids"
+    if (Test-Path $owp) { Remove-ItemProperty $owp 'Lux.Image' -ErrorAction SilentlyContinue }
+  }
   if (Test-Path $InstallDir) { Remove-Item $InstallDir -Recurse -Force -ErrorAction SilentlyContinue }
   Write-Host "Lux desinstalado ($scopeFlag)."
   try { Stop-Transcript | Out-Null } catch {}
@@ -79,7 +86,7 @@ if ($Uninstall) {
 if (-not (Test-Path (Join-Path $src $exeName))) { throw "No encuentro $exeName en $src (compilá con .\build.ps1)" }
 New-Item -ItemType Directory -Force $InstallDir | Out-Null
 Copy-Item (Join-Path $src $exeName) (Join-Path $InstallDir $exeName) -Force
-foreach ($f in 'lux.ico','README.md','LICENSE','install.ps1') {
+foreach ($f in 'lux.ico','lux-file.ico','README.md','LICENSE','install.ps1') {
   if (Test-Path (Join-Path $src $f)) { Copy-Item (Join-Path $src $f) (Join-Path $InstallDir $f) -Force }
 }
 $exe = Join-Path $InstallDir $exeName
@@ -114,6 +121,22 @@ Set-ItemProperty "$appsKey\DefaultIcon" '(default)' "$exe,0"
 Set-ItemProperty "$appsKey\shell\open\command" '(default)' "`"$exe`" `"%1`""
 New-Item -Path "$appsKey\SupportedTypes" -Force | Out-Null
 foreach ($e in $exts) { Set-ItemProperty "$appsKey\SupportedTypes" ".$e" '' }
+
+# --- ProgID propio: icono de los ARCHIVOS asociados (lux-file.ico) -------
+# Portador del icono de archivo + handler. Los archivos lo toman cuando Lux es el visor
+# predeterminado de la extensión; mientras tanto sólo aparece como opción en "Abrir con".
+$fileIco = Join-Path $InstallDir 'lux-file.ico'
+$progKey = "$hive\SOFTWARE\Classes\Lux.Image"
+New-Item -Path "$progKey\shell\open\command" -Force | Out-Null
+New-Item -Path "$progKey\DefaultIcon" -Force | Out-Null
+Set-ItemProperty $progKey '(default)' 'Imagen'
+Set-ItemProperty "$progKey\DefaultIcon" '(default)' $fileIco
+Set-ItemProperty "$progKey\shell\open\command" '(default)' "`"$exe`" `"%1`""
+foreach ($e in $exts) {
+  $owp = "$hive\SOFTWARE\Classes\.$e\OpenWithProgids"
+  New-Item -Path $owp -Force | Out-Null
+  Set-ItemProperty $owp 'Lux.Image' ''
+}
 
 $scopeTxt = if ($Machine) { 'per-machine' } else { 'per-user' }
 Write-Host "Lux $Version instalado ($scopeTxt) en $InstallDir" -ForegroundColor Green
