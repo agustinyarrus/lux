@@ -387,8 +387,28 @@ static bool decodeWIC(const std::wstring& path, ComPtr<ID2D1Bitmap>& out, UINT& 
     ComPtr<IWICBitmapDecoder> dec;
     if (FAILED(g.wic->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ,
             WICDecodeMetadataCacheOnDemand, &dec))) return false;
+    // .ico / .cur traen varias resoluciones, una por frame. WIC suele entregar primero
+    // el de 16x16 -> elegimos el frame de mayor area para verlo grande (512 si lo trae).
+    // El resto de los formatos tiene un solo frame relevante: nos quedamos con el 0.
+    UINT idx = 0;
+    std::wstring e = extOf(path);
+    if (e == L"ico" || e == L"cur") {
+        UINT count = 0;
+        if (SUCCEEDED(dec->GetFrameCount(&count)) && count > 1) {
+            UINT64 best = 0;
+            for (UINT i = 0; i < count; ++i) {
+                ComPtr<IWICBitmapFrameDecode> f;
+                if (FAILED(dec->GetFrame(i, &f))) continue;
+                UINT fw = 0, fh = 0;
+                if (FAILED(f->GetSize(&fw, &fh))) continue;
+                UINT64 area = (UINT64)fw * (UINT64)fh;
+                if (area > best) { best = area; idx = i; }
+            }
+        }
+    }
+
     ComPtr<IWICBitmapFrameDecode> frame;
-    if (FAILED(dec->GetFrame(0, &frame))) return false;
+    if (FAILED(dec->GetFrame(idx, &frame))) return false;
 
     ComPtr<IWICFormatConverter> conv;
     if (FAILED(g.wic->CreateFormatConverter(&conv))) return false;
