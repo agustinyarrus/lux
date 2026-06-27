@@ -91,6 +91,7 @@ namespace col {
 
 // metricas logicas (a 96 dpi); se escalan por g.dpi
 static const int TBH_L   = 26;   // alto barra de titulo (extra fina)
+static const int SBH_L   = 22;   // alto barra de estado inferior (detalles de la imagen)
 static const int BTNW_L  = 36;   // ancho de cada boton de ventana
 static const int RSZ_L   = 6;    // borde de resize (hit-test)
 static const UINT IDT_ANIM = 1;  // timer de animacion del cromo
@@ -120,7 +121,7 @@ struct State {
     ComPtr<ID2D1HwndRenderTarget> rt;
     ComPtr<ID2D1DeviceContext>   dc;       // QI desde rt (Win8+): cubic + efectos
     ComPtr<ID2D1SolidColorBrush> brush;    // pincel reutilizable
-    ComPtr<IDWriteTextFormat>    tfCap, tfHud, tfTitle, tfHint;
+    ComPtr<IDWriteTextFormat>    tfCap, tfHud, tfTitle, tfHint, tfStatus;
 
     // imagen actual
     ComPtr<ID2D1Bitmap>          bmp;
@@ -592,7 +593,10 @@ static void navigate(int delta) {
 static D2D1_RECT_F stageRect() {
     RECT rc; GetClientRect(g.hwnd, &rc);
     float top = g.fullscreen ? 0.f : (float)dp(TBH_L);
-    return D2D1::RectF(0, top, (float)rc.right, (float)rc.bottom);
+    // la barra de estado inferior solo existe cuando hay imagen cargada
+    float bot = (g.fullscreen || !g.bmp) ? (float)rc.bottom
+                                         : (float)rc.bottom - (float)dp(SBH_L);
+    return D2D1::RectF(0, top, (float)rc.right, bot);
 }
 static float fitScale() {
     if (!g.imgW || !g.imgH) return 1.f;
@@ -693,11 +697,12 @@ static void createTextFormats() {
         g.dw->CreateTextFormat(L"Cascadia Code", nullptr, w, DWRITE_FONT_STYLE_NORMAL,
             DWRITE_FONT_STRETCH_NORMAL, px, L"", out);
     };
-    g.tfCap.Reset(); g.tfHud.Reset(); g.tfTitle.Reset(); g.tfHint.Reset();
+    g.tfCap.Reset(); g.tfHud.Reset(); g.tfTitle.Reset(); g.tfHint.Reset(); g.tfStatus.Reset();
     mk(dpf(10.0f), DWRITE_FONT_WEIGHT_LIGHT, &g.tfCap);
     mk(dpf(11.5f), DWRITE_FONT_WEIGHT_LIGHT, &g.tfHud);
     mk(dpf(13.5f), DWRITE_FONT_WEIGHT_LIGHT, &g.tfTitle);
     mk(dpf(11.0f), DWRITE_FONT_WEIGHT_LIGHT, &g.tfHint);
+    mk(dpf(10.0f), DWRITE_FONT_WEIGHT_LIGHT, &g.tfStatus);
     if (g.tfCap)  {
         g.tfCap->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
         g.tfCap->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
@@ -710,6 +715,7 @@ static void createTextFormats() {
     if (g.tfHud)  { g.tfHud->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);  g.tfHud->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER); }
     if (g.tfTitle){ g.tfTitle->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);g.tfTitle->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER); }
     if (g.tfHint) { g.tfHint->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER); g.tfHint->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER); }
+    if (g.tfStatus){ g.tfStatus->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER); g.tfStatus->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP); } // izquierda (LEADING), centrado vertical
     g.capKeyW = -1;   // forzar recalculo del caption con el nuevo formato
 }
 
@@ -831,14 +837,36 @@ static void drawWindowButtons() {
     }
 }
 
-// Mide el ancho (px) de un texto con el formato del caption.
-static float measureCapW(const std::wstring& s) {
-    if (s.empty() || !g.dw || !g.tfCap) return 0.f;
+// Mide el ancho (px) de un texto con un formato dado.
+static float measureW(IDWriteTextFormat* fmt, const std::wstring& s) {
+    if (s.empty() || !g.dw || !fmt) return 0.f;
     ComPtr<IDWriteTextLayout> tl;
-    if (FAILED(g.dw->CreateTextLayout(s.c_str(), (UINT32)s.size(), g.tfCap.Get(), 100000.f, 100.f, &tl)))
+    if (FAILED(g.dw->CreateTextLayout(s.c_str(), (UINT32)s.size(), fmt, 100000.f, 100.f, &tl)))
         return 0.f;
     DWRITE_TEXT_METRICS m{}; tl->GetMetrics(&m);
     return m.widthIncludingTrailingWhitespace;
+}
+static float measureCapW(const std::wstring& s) { return measureW(g.tfCap.Get(), s); }
+
+// Peso de archivo humanizado (B / KB / MB / GB).
+static std::wstring humanSize(UINT64 b) {
+    wchar_t buf[32];
+    if      (b >= 1024ull*1024*1024) swprintf(buf, 32, L"%.1f GB", (double)b / (1024.0*1024*1024));
+    else if (b >= 1024ull*1024)      swprintf(buf, 32, L"%.1f MB", (double)b / (1024.0*1024));
+    else if (b >= 1024)              swprintf(buf, 32, L"%.0f KB", (double)b / 1024.0);
+    else                             swprintf(buf, 32, L"%llu B", (unsigned long long)b);
+    return buf;
+}
+// Tamaño del archivo actual, cacheado por ruta (evita stat en cada frame).
+static UINT64 fileSizeCached(const std::wstring& path) {
+    static std::wstring cachedPath; static UINT64 cachedSize = 0;
+    if (path != cachedPath) {
+        cachedPath = path; cachedSize = 0;
+        WIN32_FILE_ATTRIBUTE_DATA fad{};
+        if (!path.empty() && GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fad))
+            cachedSize = ((UINT64)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
+    }
+    return cachedSize;
 }
 
 // Arma "nombre   ·   idx / total" truncando SOLO el nombre con … si no entra en la barra
@@ -913,7 +941,7 @@ static void drawHud() {
     float hh = dpf(24);
     RECT rc; GetClientRect(g.hwnd, &rc);
     float cx = rc.right * 0.5f;
-    float y2 = rc.bottom - dpf(22);
+    float y2 = rc.bottom - (float)dp(SBH_L) - dpf(14);   // por encima de la barra de estado
     D2D1_RECT_F pill = D2D1::RectF(cx - w*0.5f, y2 - hh, cx + w*0.5f, y2);
     D2D1_ROUNDED_RECT rr = D2D1::RoundedRect(pill, hh*0.5f, hh*0.5f);
 
@@ -925,6 +953,51 @@ static void drawHud() {
     setBrush(col::fgDim, a);
     D2D1_RECT_F tr = D2D1::RectF(pill.left, pill.top, pill.right, pill.bottom);
     g.rt->DrawTextW(s.c_str(), (UINT32)s.size(), g.tfHud.Get(), tr, g.brush.Get());
+}
+
+// Barra de estado inferior: detalles de la imagen. Fina como la de titulo y con
+// el mismo fondo; se desvanece con el cromo. Izquierda: FORMATO · WxH · MP · peso.
+// Derecha: zoom %.
+static void drawStatusBar() {
+    if (g.fullscreen || !g.bmp || !g.tfStatus) return;
+    RECT rc; GetClientRect(g.hwnd, &rc);
+    float h   = (float)dp(SBH_L);
+    float top = (float)rc.bottom - h;
+    float a   = g.chrome;
+
+    // fondo (igual que la barra de titulo) + hairline superior sutil
+    setBrush(col::bg, 1.f);
+    g.rt->FillRectangle(D2D1::RectF(0, top, (float)rc.right, (float)rc.bottom), g.brush.Get());
+    setBrush(D2D1::ColorF(1, 1, 1, 1), 0.05f * a);
+    g.rt->DrawLine(D2D1::Point2F(0, top + dpf(0.5f)),
+                   D2D1::Point2F((float)rc.right, top + dpf(0.5f)), g.brush.Get(), dpf(1));
+    if (a <= 0.01f) return;
+
+    float padX = dpf(14.f);
+
+    // derecha: zoom % (se mide primero para reservar su ancho y no pisar la izquierda)
+    wchar_t zb[24]; swprintf(zb, 24, L"%d %%", (int)lround(g.scale * 100.0));
+    std::wstring zoom = zb;
+    float zw = measureW(g.tfStatus.Get(), zoom);
+    setBrush(col::fgFaint, a);
+    D2D1_RECT_F zr = D2D1::RectF((float)rc.right - padX - zw, top, (float)rc.right - padX, (float)rc.bottom);
+    g.rt->DrawTextW(zoom.c_str(), (UINT32)zoom.size(), g.tfStatus.Get(), zr, g.brush.Get(),
+                    D2D1_DRAW_TEXT_OPTIONS_CLIP);
+
+    // izquierda: FORMATO · ancho × alto · megapixeles · peso
+    std::wstring fmt = g.fmtLabel;
+    if (fmt.empty()) { fmt = extOf(g.imgPath); for (auto& c : fmt) c = (wchar_t)towupper(c); }
+    const std::wstring sep = L"   ·   ";
+    std::wstring left = fmt + sep + std::to_wstring(g.imgW) + L" × " + std::to_wstring(g.imgH);
+    double mp = (double)g.imgW * (double)g.imgH / 1e6;
+    if (mp >= 1.0) { wchar_t mb[24]; swprintf(mb, 24, L"%.1f MP", mp); left += sep + mb; }
+    UINT64 bytes = fileSizeCached(g.imgPath);
+    if (bytes) left += sep + humanSize(bytes);
+
+    setBrush(col::fgDim, a);
+    D2D1_RECT_F lr = D2D1::RectF(padX, top, (float)rc.right - padX - zw - dpf(18.f), (float)rc.bottom);
+    g.rt->DrawTextW(left.c_str(), (UINT32)left.size(), g.tfStatus.Get(), lr, g.brush.Get(),
+                    D2D1_DRAW_TEXT_OPTIONS_CLIP);
 }
 
 // logo "lux": un destello/sol minimalista (distinto del iris de Lumen)
@@ -1037,6 +1110,7 @@ static void render() {
         drawEmpty();
     }
 
+    drawStatusBar();
     drawTitleBar();
 
     HRESULT hr = g.rt->EndDraw();
@@ -1272,7 +1346,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // pan solo si la imagen excede el escenario
         D2D1_RECT_F s = stageRect();
         bool canPan = g.bmp && (g.imgW*g.scale > (s.right-s.left)+1 || g.imgH*g.scale > (s.bottom-s.top)+1);
-        if (canPan && hitButton(x,y) < 0 && y >= dp(TBH_L)) {
+        if (canPan && hitButton(x,y) < 0 && (float)y >= s.top && (float)y < s.bottom) {
             g.panning = true; g.panStart = { x, y }; g.panOX = g.ox; g.panOY = g.oy;
             SetCursor(LoadCursor(nullptr, IDC_SIZEALL));
         }
