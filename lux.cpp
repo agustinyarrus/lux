@@ -1277,6 +1277,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         DwmSetWindowAttribute(hwnd, 20 /*DWMWA_USE_IMMERSIVE_DARK_MODE*/, &dark, sizeof(dark));
         int pref = 2; // DWMWCP_ROUND
         DwmSetWindowAttribute(hwnd, 33 /*DWMWA_WINDOW_CORNER_PREFERENCE*/, &pref, sizeof(pref));
+        // borde negro en vez del gris claro por defecto de Win11 (COLORREF 0x00BBGGRR)
+        COLORREF border = RGB(0, 0, 0);
+        DwmSetWindowAttribute(hwnd, 34 /*DWMWA_BORDER_COLOR*/, &border, sizeof(border));
         // sombra del sistema sobre ventana sin marco
         MARGINS m{ 0, 0, 0, 1 };
         DwmExtendFrameIntoClientArea(hwnd, &m);
