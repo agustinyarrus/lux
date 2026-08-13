@@ -55,10 +55,13 @@ $src       = $PSScriptRoot
 $scopeFlag = if ($Machine) { '-Machine' } else { '-PerUser' }
 
 # Extensiones que Lux abre (misma lista que lux.iss / README).
-$exts = @('jpg','jpeg','jpe','jfif','png','apng','gif','bmp','dib','tif','tiff','ico','cur',
-          'dds','jxr','wdp','hdp','webp','heic','heif','avif','jxl','svg','qoi','exr',
-          'tga','hdr','pic','ppm','pgm','pbm','pnm','pam','psd','pcx','pfm','ras','sun',
-          'sgi','rgb','bw','wbmp','xbm','ff','dng','cr2','cr3','nef','arw','orf','rw2')
+$exts = @('jpg','jpeg','jpe','jfif','png','apng','gif','bmp','dib','tif','tiff','ico','cur','ani',
+          'mpo','jps','dds','jxr','wdp','hdp','webp','heic','heif','avif','jxl','svg','svgz',
+          'qoi','exr','tga','targa','icb','vda','vst','tpic','hdr','rgbe','xyze','pic',
+          'ppm','pgm','pbm','pnm','pam','psd','pdd','pcx','pfm','ras','sun',
+          'sgi','rgb','bw','wbmp','xbm','xpm','xwd','ff','farbfeld',
+          'iff','ilbm','lbm','mac','pntg','dpx','cin','icns','ora','kra',
+          'dng','cr2','cr3','nef','arw','orf','rw2')
 
 $startMenu = Join-Path $startMenuDir "$AppName.lnk"
 $uninstKey = "$hive\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\$AppName"

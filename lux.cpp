@@ -53,7 +53,8 @@
 #define TINYEXR_IMPLEMENTATION
 #include "third_party/tinyexr.h"
 
-#include "third_party/exotic.h"            // pcx, farbfeld, pfm, sun, sgi, wbmp, pam, xbm
+#include "third_party/exotic.h"            // pcx, farbfeld, pfm, sun, sgi, ilbm, icns, dpx…
+#include "third_party/unpack.h"            // gzip (svgz) y ZIP (ora/kra), sobre el zlib de stb
 
 #pragma comment(lib, "d2d1.lib")
 #pragma comment(lib, "dwrite.lib")
@@ -280,33 +281,51 @@ static void saveConfig() {
 static bool isImageExt(const std::wstring& e) {
     static const wchar_t* exts[] = {
         // WIC nativo
-        L"bmp",L"dib",L"rle",L"gif",L"ico",L"cur",L"jpg",L"jpeg",L"jpe",L"jfif",L"jif",
-        L"png",L"apng",L"tif",L"tiff",L"dds",L"wdp",L"jxr",L"hdp",
+        L"bmp",L"dib",L"rle",L"gif",L"ico",L"cur",L"ani",L"jpg",L"jpeg",L"jpe",L"jfif",L"jif",
+        L"mpo",L"jps",L"png",L"apng",L"tif",L"tiff",L"dds",L"wdp",L"jxr",L"hdp",
         // WIC + codecs del Store (si estan instalados)
         L"webp",L"heic",L"heif",L"avif",L"jxl",
         // RAW comunes (codec del fabricante / Raw Image Extension)
         L"cr2",L"cr3",L"nef",L"arw",L"dng",L"orf",L"rw2",L"raf",L"srw",L"pef",
         // stb
-        L"tga",L"targa",L"hdr",L"pic",L"ppm",L"pgm",L"pbm",L"pnm",L"psd",
+        L"tga",L"targa",L"icb",L"vda",L"vst",L"tpic",L"hdr",L"rgbe",L"xyze",L"pic",
+        L"ppm",L"pgm",L"pbm",L"pnm",L"psd",L"pdd",
         // decoders propios (header-only)
-        L"svg",L"qoi",L"exr",
+        L"svg",L"svgz",L"qoi",L"exr",
+        // contenedores comprimidos (ZIP con la imagen aplanada adentro)
+        L"ora",L"kra",
         // exóticos (exotic.h)
         L"pcx",L"pfm",L"ff",L"farbfeld",L"ras",L"sun",L"sgi",L"rgb",L"rgba",L"bw",
         L"int",L"inta",L"wbmp",L"pam",L"xbm",L"im1",L"im8",L"im24",L"im32",
+        L"xpm",L"iff",L"ilbm",L"lbm",L"mac",L"pntg",L"macp",L"xwd",L"dpx",L"cin",L"icns",
     };
     for (auto* x : exts) if (e == x) return true;
     return false;
 }
 // Estos los hace mejor (o solo) stb_image.
 static bool prefersStb(const std::wstring& e) {
-    return e == L"tga" || e == L"targa" || e == L"hdr" || e == L"pic" ||
-           e == L"ppm" || e == L"pgm"   || e == L"pbm" || e == L"pnm" || e == L"psd";
+    return e == L"tga"  || e == L"targa" || e == L"icb"  || e == L"vda" || e == L"vst" ||
+           e == L"tpic" || e == L"hdr"   || e == L"rgbe" || e == L"xyze"||
+           e == L"pic"  || e == L"ppm"   || e == L"pgm"  || e == L"pbm" || e == L"pnm" ||
+           e == L"psd"  || e == L"pdd";
 }
 static std::wstring fmtLabelFor(const std::wstring& e) {
     if (e==L"jpg"||e==L"jpeg"||e==L"jpe"||e==L"jfif"||e==L"jif") return L"JPEG";
     if (e==L"tif"||e==L"tiff") return L"TIFF";
     if (e==L"jxr"||e==L"wdp"||e==L"hdp") return L"JPEG-XR";
     if (e==L"heic"||e==L"heif") return L"HEIF";
+    if (e==L"tga"||e==L"targa"||e==L"icb"||e==L"vda"||e==L"vst"||e==L"tpic") return L"TGA";
+    if (e==L"hdr"||e==L"rgbe"||e==L"xyze") return L"Radiance HDR";
+    if (e==L"psd"||e==L"pdd") return L"PSD";
+    if (e==L"iff"||e==L"ilbm"||e==L"lbm") return L"ILBM";
+    if (e==L"mac"||e==L"pntg"||e==L"macp") return L"MacPaint";
+    if (e==L"ff"||e==L"farbfeld") return L"farbfeld";
+    if (e==L"ras"||e==L"sun") return L"Sun Raster";
+    if (e==L"sgi"||e==L"rgb"||e==L"rgba"||e==L"bw"||e==L"int"||e==L"inta") return L"SGI";
+    if (e==L"cin") return L"Cineon";
+    if (e==L"ora") return L"OpenRaster";
+    if (e==L"kra") return L"Krita";
+    if (e==L"ppm"||e==L"pgm"||e==L"pbm"||e==L"pnm"||e==L"pam") return L"Netpbm";
     std::wstring u = e; for (auto& c:u) c=(wchar_t)towupper(c); return u;
 }
 
@@ -385,17 +404,14 @@ static bool bitmapFromRGBA(unsigned char* rgba, UINT w, UINT h, ComPtr<ID2D1Bitm
     return true;
 }
 
-static bool decodeWIC(const std::wstring& path, ComPtr<ID2D1Bitmap>& out, UINT& w, UINT& h) {
-    if (!g.wic || !g.rt) return false;
-    ComPtr<IWICBitmapDecoder> dec;
-    if (FAILED(g.wic->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ,
-            WICDecodeMetadataCacheOnDemand, &dec))) return false;
-    // .ico / .cur traen varias resoluciones, una por frame. WIC suele entregar primero
-    // el de 16x16 -> elegimos el frame de mayor area para verlo grande (512 si lo trae).
-    // El resto de los formatos tiene un solo frame relevante: nos quedamos con el 0.
+// Nucleo comun: de un decoder WIC ya abierto al ID2D1Bitmap final.
+// `pickLargest` es para los contenedores multi-resolucion (.ico/.cur): WIC suele
+// entregar primero el frame de 16x16 y queremos el mas grande que traiga.
+static bool decodeWICDecoder(IWICBitmapDecoder* dec, bool pickLargest,
+                             ComPtr<ID2D1Bitmap>& out, UINT& w, UINT& h) {
+    if (!g.wic || !g.rt || !dec) return false;
     UINT idx = 0;
-    std::wstring e = extOf(path);
-    if (e == L"ico" || e == L"cur") {
+    if (pickLargest) {
         UINT count = 0;
         if (SUCCEEDED(dec->GetFrameCount(&count)) && count > 1) {
             UINT64 best = 0;
@@ -437,6 +453,29 @@ static bool decodeWIC(const std::wstring& path, ComPtr<ID2D1Bitmap>& out, UINT& 
     return true;
 }
 
+static bool decodeWIC(const std::wstring& path, ComPtr<ID2D1Bitmap>& out, UINT& w, UINT& h) {
+    if (!g.wic) return false;
+    ComPtr<IWICBitmapDecoder> dec;
+    if (FAILED(g.wic->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ,
+            WICDecodeMetadataCacheOnDemand, &dec))) return false;
+    std::wstring e = extOf(path);
+    return decodeWICDecoder(dec.Get(), e == L"ico" || e == L"cur", out, w, h);
+}
+
+// Igual pero desde un buffer en memoria: lo usan los contenedores (ANI, ORA/KRA).
+// El buffer tiene que seguir vivo durante la llamada.
+static bool decodeWICMem(const unsigned char* data, size_t len, bool pickLargest,
+                         ComPtr<ID2D1Bitmap>& out, UINT& w, UINT& h) {
+    if (!g.wic || !data || !len || len > UINT_MAX) return false;
+    ComPtr<IWICStream> stream;
+    if (FAILED(g.wic->CreateStream(&stream))) return false;
+    if (FAILED(stream->InitializeFromMemory(const_cast<BYTE*>(data), (DWORD)len))) return false;
+    ComPtr<IWICBitmapDecoder> dec;
+    if (FAILED(g.wic->CreateDecoderFromStream(stream.Get(), nullptr,
+            WICDecodeMetadataCacheOnDemand, &dec))) return false;
+    return decodeWICDecoder(dec.Get(), pickLargest, out, w, h);
+}
+
 static bool decodeSTB(const std::wstring& path, ComPtr<ID2D1Bitmap>& out, UINT& w, UINT& h) {
     if (!g.rt) return false;
     std::string u8 = toUtf8(path);
@@ -450,11 +489,10 @@ static bool decodeSTB(const std::wstring& path, ComPtr<ID2D1Bitmap>& out, UINT& 
 }
 
 // SVG vectorial (nanosvg): se rasteriza a ~1600 px en el lado mayor (nitido al hacer zoom).
-static bool decodeSVG(const std::wstring& path, ComPtr<ID2D1Bitmap>& out, UINT& ow, UINT& oh) {
-    if (!g.rt) return false;
-    std::vector<unsigned char> buf;
-    if (!readFileBytes(path, buf)) return false;
-    buf.push_back(0); // nsvgParse necesita un string mutable terminado en NUL
+// `buf` tiene que ser mutable y terminar en NUL: nsvgParse lo consume in-place.
+static bool decodeSVGBytes(std::vector<unsigned char>& buf, ComPtr<ID2D1Bitmap>& out, UINT& ow, UINT& oh) {
+    if (!g.rt || buf.empty()) return false;
+    if (buf.back() != 0) buf.push_back(0);
     NSVGimage* img = nsvgParse((char*)buf.data(), "px", 96.0f);
     if (!img) return false;
     if (img->width < 1.f || img->height < 1.f) { nsvgDelete(img); return false; }
@@ -472,6 +510,11 @@ static bool decodeSVG(const std::wstring& path, ComPtr<ID2D1Bitmap>& out, UINT& 
     if (!bitmapFromRGBA(px.data(), w, h, out)) return false;
     ow = w; oh = h;
     return true;
+}
+static bool decodeSVG(const std::wstring& path, ComPtr<ID2D1Bitmap>& out, UINT& ow, UINT& oh) {
+    std::vector<unsigned char> buf;
+    if (!readFileBytes(path, buf)) return false;
+    return decodeSVGBytes(buf, out, ow, oh);
 }
 
 // QOI (Quite OK Image): decodifica desde memoria; valida su firma 'qoif'.
@@ -518,10 +561,20 @@ static bool decodeEXR(const std::wstring& path, ComPtr<ID2D1Bitmap>& out, UINT& 
 static bool isExoticExt(const std::wstring& e) {
     return e==L"pcx"||e==L"pfm"||e==L"ras"||e==L"sun"||e==L"sgi"||e==L"rgb"||e==L"rgba"||
            e==L"bw"||e==L"int"||e==L"inta"||e==L"wbmp"||e==L"pam"||e==L"xbm"||e==L"ff"||
-           e==L"farbfeld"||e==L"im1"||e==L"im8"||e==L"im24"||e==L"im32";
+           e==L"farbfeld"||e==L"im1"||e==L"im8"||e==L"im24"||e==L"im32"||
+           e==L"xpm"||e==L"iff"||e==L"ilbm"||e==L"lbm"||e==L"mac"||e==L"pntg"||e==L"macp"||
+           e==L"xwd"||e==L"dpx"||e==L"cin"||e==L"icns";
+}
+// exotic.h delega en stb la decodificación de las imágenes que vienen embebidas
+// dentro de un contenedor (los PNG de un .icns, por ejemplo).
+static unsigned char* luxDecodeEmbedded(const unsigned char* d, size_t n, int* w, int* h) {
+    if (!d || !n || n > INT_MAX) return nullptr;
+    int comp = 0;
+    return stbi_load_from_memory(d, (int)n, w, h, &comp, 4);   // RGBA; lo libera exotic con free()
 }
 static bool decodeExotic(const std::wstring& path, ComPtr<ID2D1Bitmap>& out, UINT& ow, UINT& oh) {
     if (!g.rt) return false;
+    ex_decode_embedded = luxDecodeEmbedded;
     std::vector<unsigned char> buf;
     if (!readFileBytes(path, buf)) return false;
     std::string ext = toUtf8(extOf(path));
@@ -534,15 +587,60 @@ static bool decodeExotic(const std::wstring& path, ComPtr<ID2D1Bitmap>& out, UIN
     return ok;
 }
 
+// ---------------------------------------------------------------------------
+//  Contenedores: hay que desenvolverlos antes de que decodifique alguien mas.
+//  La desenvoltura (gzip/ZIP) vive en unpack.h y reusa el inflate que ya trae
+//  stb para el PNG, asi que no suma dependencias.
+// ---------------------------------------------------------------------------
+
+// SVGZ = SVG comprimido con gzip (lo que exporta Inkscape con "comprimido").
+static bool decodeSVGZ(const std::wstring& path, ComPtr<ID2D1Bitmap>& out, UINT& ow, UINT& oh) {
+    std::vector<unsigned char> gz, svg;
+    if (!readFileBytes(path, gz)) return false;
+    if (!up_gunzip(gz, svg)) return decodeSVG(path, out, ow, oh);  // .svgz sin comprimir de verdad
+    return decodeSVGBytes(svg, out, ow, oh);
+}
+
+// ANI: cursor animado de Windows; mostramos el primer cuadro (a mayor resolucion).
+static bool decodeANI(const std::wstring& path, ComPtr<ID2D1Bitmap>& out, UINT& ow, UINT& oh) {
+    std::vector<unsigned char> b;
+    size_t off = 0, len = 0;
+    if (!readFileBytes(path, b) || !up_ani_frame(b, &off, &len)) return false;
+    return decodeWICMem(b.data() + off, len, true, out, ow, oh);
+}
+
+// OpenRaster (.ora) y Krita (.kra): ZIP con la imagen ya aplanada adentro.
+static bool decodeZipImage(const std::wstring& path, ComPtr<ID2D1Bitmap>& out, UINT& ow, UINT& oh) {
+    std::vector<unsigned char> z;
+    if (!readFileBytes(path, z)) return false;
+    const char* names[] = { "mergedimage.png", "preview.png", "Thumbnails/thumbnail.png" };
+    for (const char* nm : names) {
+        std::vector<unsigned char> img;
+        if (!up_zip_extract(z, nm, img) || img.empty()) continue;
+        if (decodeWICMem(img.data(), img.size(), false, out, ow, oh)) return true;
+        int iw, ih, comp;
+        if (stbi_uc* px = stbi_load_from_memory(img.data(), (int)img.size(), &iw, &ih, &comp, 4)) {
+            bool ok = bitmapFromRGBA(px, (UINT)iw, (UINT)ih, out);
+            stbi_image_free(px);
+            if (ok) { ow = (UINT)iw; oh = (UINT)ih; return true; }
+        }
+    }
+    return false;
+}
+
 // Cadena unica: elige decoder por extension y cae a otros si falla.
 static bool decodeAny(const std::wstring& path, ComPtr<ID2D1Bitmap>& bmp, UINT& w, UINT& h) {
     std::wstring e = extOf(path);
-    if (e == L"svg") return decodeSVG(path, bmp, w, h);
-    if (e == L"qoi") return decodeQOI(path, bmp, w, h);
-    if (e == L"exr") return decodeEXR(path, bmp, w, h);
+    if (e == L"svg")  return decodeSVG(path, bmp, w, h);
+    if (e == L"svgz" || e == L"gz") return decodeSVGZ(path, bmp, w, h);  // .svgz / .svg.gz
+    if (e == L"qoi")  return decodeQOI(path, bmp, w, h);
+    if (e == L"exr")  return decodeEXR(path, bmp, w, h);
+    if (e == L"ani")  return decodeANI(path, bmp, w, h);
+    if (e == L"ora" || e == L"kra") return decodeZipImage(path, bmp, w, h);
     if (isExoticExt(e)) return decodeExotic(path, bmp, w, h);
     if (prefersStb(e)) {
         if (decodeSTB(path, bmp, w, h)) return true;
+        if (decodeExotic(path, bmp, w, h)) return true;  // Netpbm en ASCII (P1/P2/P3)
         return decodeWIC(path, bmp, w, h);
     }
     if (decodeWIC(path, bmp, w, h)) return true;
@@ -1198,8 +1296,9 @@ static void openDialog() {
     OPENFILENAMEW ofn{ sizeof(ofn) };
     ofn.hwndOwner = g.hwnd;
     ofn.lpstrFilter =
-        L"Imágenes\0*.jpg;*.jpeg;*.png;*.gif;*.bmp;*.tif;*.tiff;*.webp;*.heic;*.heif;*.avif;*.jxl;*.svg;*.qoi;*.exr;"
-        L"*.ico;*.tga;*.hdr;*.dds;*.jxr;*.ppm;*.pgm;*.pbm;*.pnm;*.pam;*.psd;*.pcx;*.pfm;*.ras;*.sgi;*.rgb;*.bw;*.wbmp;*.xbm;*.ff;*.dng;*.cr2;*.nef;*.arw\0"
+        L"Imágenes\0*.jpg;*.jpeg;*.png;*.gif;*.bmp;*.tif;*.tiff;*.webp;*.heic;*.heif;*.avif;*.jxl;*.svg;*.svgz;*.qoi;*.exr;"
+        L"*.ico;*.cur;*.ani;*.icns;*.tga;*.hdr;*.dds;*.jxr;*.ppm;*.pgm;*.pbm;*.pnm;*.pam;*.psd;*.pcx;*.pfm;*.ras;*.sgi;*.rgb;*.bw;*.wbmp;"
+        L"*.xbm;*.xpm;*.xwd;*.ff;*.iff;*.ilbm;*.lbm;*.mac;*.pntg;*.dpx;*.cin;*.ora;*.kra;*.dng;*.cr2;*.nef;*.arw\0"
         L"Todos\0*.*\0\0";
     ofn.lpstrFile = file; ofn.nMaxFile = MAX_PATH;
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER;

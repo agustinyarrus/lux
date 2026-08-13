@@ -9,6 +9,11 @@
 # Desarrollo / pruebas (no se publica)
 _dev/
 
+# Tests: las muestras las fabrica gen_samples.py, el exe lo compila run.ps1
+tests/samples/
+tests/*.exe
+tests/_smoke/
+
 # Varios
 *.log
 Thumbs.db

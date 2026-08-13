@@ -33,15 +33,19 @@ desenfocado. **Funciona 100% offline** y no carga ningún runtime: es Win32 a se
 
 Lux abre prácticamente todo. **Vectorial** rasterizado con nanosvg (nítido a cualquier zoom):
 
-> `svg`
+> `svg` · `svgz` (comprimido con gzip)
 
 **Por WIC**, con los códecs del sistema / Microsoft Store:
 
-> `jpg` · `jpeg` · `png` · `gif` · `bmp` · `tiff` · `ico` · `dds` · `jxr` / `hdp` · `webp`* · `heic`* / `heif`* · `avif`* · `jxl`* · `raw`* (`cr2` `cr3` `nef` `arw` `dng` `orf` `rw2` `raf` `srw` `pef` …)
+> `jpg` · `jpeg` · `png` · `gif` · `bmp` · `tiff` · `ico` · `cur` · `ani` · `dds` · `jxr` / `hdp` · `mpo` / `jps` · `webp`* · `heic`* / `heif`* · `avif`* · `jxl`* · `raw`* (`cr2` `cr3` `nef` `arw` `dng` `orf` `rw2` `raf` `srw` `pef` …)
 
 **Por decoders propios integrados** (header-only, sin dependencias):
 
-> `qoi` · `exr` (OpenEXR HDR) · `pcx` · `pfm` · `ff` (farbfeld) · `ras` / `sun` · `sgi` / `rgb` / `bw` · `wbmp` · `pam` · `xbm` · `tga` · `hdr` · `ppm` / `pgm` / `pbm` / `pnm` · `pic` · `psd`
+> `qoi` · `exr` (OpenEXR HDR) · `pcx` · `pfm` · `ff` (farbfeld) · `ras` / `sun` · `sgi` / `rgb` / `bw` · `wbmp` · `pam` · `xbm` · `xpm` · `tga` · `hdr` · `ppm` / `pgm` / `pbm` / `pnm` (binario **y** ASCII) · `pic` · `psd`
+
+**Formatos de otras plataformas y de la industria del cine:**
+
+> `icns` (iconos de macOS) · `iff` / `ilbm` / `lbm` (Amiga, con **HAM** y **EHB**) · `mac` / `pntg` (MacPaint) · `xwd` (X Window Dump) · `dpx` · `cin` (Cineon, con la curva log del negativo) · `ora` (OpenRaster) · `kra` (Krita)
 
 <sub>Si el formato de imagen existe, es muy probable que Lux lo abra.</sub>
 
@@ -116,7 +120,8 @@ o asocialo en _Abrir con…_ y usalo como visor por defecto.
 | Pieza                  | Rol                                                                            |
 |------------------------|--------------------------------------------------------------------------------|
 | `lux.cpp`              | Todo: ventana frameless, decodificación (WIC + stb + SVG + QOI), render D2D, input, navegación |
-| `third_party/`         | Decoders _header-only_: `stb_image`, `nanosvg` (SVG), `qoi`, `tinyexr` (EXR, reusa el zlib de stb), `exotic.h` (pcx/farbfeld/pfm/sun/sgi/wbmp/pam/xbm) |
+| `third_party/`         | Decoders _header-only_: `stb_image`, `nanosvg` (SVG), `qoi`, `tinyexr` (EXR, reusa el zlib de stb), `exotic.h` (pcx/farbfeld/pfm/sun/sgi/ilbm/icns/dpx/xwd/xpm…), `unpack.h` (gzip y ZIP, sobre el mismo zlib) |
+| `tests/`               | `gen_samples.py` fabrica una imagen de referencia en cada formato y `run.ps1` compila y corre los asserts contra ella |
 | `lux.manifest`         | DPI _per-monitor v2_, common controls, code page UTF-8                          |
 | `lux.rc`               | Icono + versión + manifest embebidos                                           |
 | `lux.ico` / `lux-file.ico` | Iconos curados (16→256, 32-bit): la app y los archivos asociados (ProgID `Lux.Image`) |
@@ -125,7 +130,16 @@ o asocialo en _Abrir con…_ y usalo como visor por defecto.
 
 Toda la decodificación pasa por una cadena con _fallback_: los formatos típicos van por **WIC**
 (acelerado, con orientación y códecs del sistema); los raros (`ppm`, `tga`, `hdr`, `psd`…) por **stb_image**;
-si una vía falla, se intenta la otra.
+si una vía falla, se intenta la otra. Los contenedores (`svgz`, `ani`, `ora`, `kra`) se desenvuelven
+primero con `unpack.h` y recién después se decodifica lo que traen adentro.
+
+Para correr los tests de los decoders propios (necesita Python para fabricar las muestras):
+
+```powershell
+cd tests
+.\run.ps1     # compila y corre los asserts contra las muestras
+.\smoke.ps1   # abre cada muestra con lux.exe de verdad (usa un %APPDATA% aparte)
+```
 
 ## 📄 Licencia
 
