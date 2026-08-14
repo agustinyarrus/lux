@@ -8,7 +8,9 @@ $root = $PSScriptRoot
 Push-Location $root
 try {
   if (-not $NoGen) {
-    $py = (Get-Command python -ErrorAction SilentlyContinue) ?? (Get-Command py -ErrorAction SilentlyContinue)
+    # (nada de ?? aca: esto tiene que correr tambien en la PowerShell 5.1 de Windows)
+    $py = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $py) { $py = Get-Command py -ErrorAction SilentlyContinue }
     if (-not $py) { throw "python no encontrado (hace falta para generar las muestras)" }
     & $py.Source "gen_samples.py"
     if ($LASTEXITCODE -ne 0) { throw "gen_samples.py fallo" }

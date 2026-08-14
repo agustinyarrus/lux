@@ -1,8 +1,8 @@
 // exotic.h — decoders header-only propios para formatos de imagen raros.
 // Cada uno devuelve RGBA8 (malloc, el caller libera con free) o NULL.
 // Formatos: Farbfeld, PCX, PFM, Sun Raster, SGI/RGB, WBMP, PAM, XBM,
-//           PNM ASCII (P1/P2/P3), XPM, IFF ILBM (HAM/EHB), MacPaint, XWD,
-//           DPX, Cineon, ICNS.
+//           PNM ASCII (P1/P2/P3), XPM, IFF ILBM/PBM/ACBM (HAM/EHB), MacPaint,
+//           XWD, DPX, Cineon, ICNS.
 #pragma once
 #include <stdlib.h>
 #include <string.h>
@@ -47,18 +47,39 @@ static unsigned char* ex_farbfeld(const unsigned char* d, size_t n, int* w, int*
     *w=(int)W; *h=(int)H; return out;
 }
 
-// ---------------------------------------------------------------- PCX (8-bit, 1/3/4 planos)
+// ---------------------------------------------------------------- PCX (1/2/4/8 bits, 1..4 planos)
+// El PCX de los 80 venia en todos los sabores: monocromo, CGA de 4 colores, EGA
+// de 16 (planar), VGA de 256 (paleta al final) y RGB de 24 bits en 3 planos.
 static unsigned char* ex_pcx(const unsigned char* d, size_t n, int* w, int* h){
     if(n<128 || d[0]!=0x0A) return NULL;
     int bpp=d[3];
     int xmin=ex_le16(d+4), ymin=ex_le16(d+6), xmax=ex_le16(d+8), ymax=ex_le16(d+10);
     int W=xmax-xmin+1, H=ymax-ymin+1, planes=d[65], bpl=ex_le16(d+66);
-    if(W<=0||H<=0||W>20000||H>20000||bpp!=8||(planes!=1&&planes!=3&&planes!=4)||bpl<=0) return NULL;
+    if(W<=0||H<=0||W>20000||H>20000||bpl<=0) return NULL;
+    if(bpp!=1 && bpp!=2 && bpp!=4 && bpp!=8) return NULL;
+    if(planes<1 || planes>4) return NULL;
+    int indexed = !(bpp==8 && planes>=3);           // 8 bits x 3-4 planos = RGB directo
+    int ncol = indexed ? (1<<(bpp*planes)) : 0;
+    if(indexed && ncol>256) return NULL;
     int total=bpl*planes;
+    // paleta: la VGA de 256 va al final tras un 0x0C; la EGA de 16 vive en la cabecera
+    const unsigned char* pal=(planes==1 && bpp==8 && n>=769 && d[n-769]==0x0C) ? d+n-768 : NULL;
+    unsigned char ega[48];
+    if(indexed && !pal){
+        memcpy(ega, d+16, 48);
+        int allZero=1; for(int i=0;i<48;i++) if(ega[i]) { allZero=0; break; }
+        if(allZero){                                 // sin paleta util: blanco y negro / EGA por defecto
+            static const unsigned char def[16][3]={
+                {0,0,0},{0,0,170},{0,170,0},{0,170,170},{170,0,0},{170,0,170},{170,85,0},{170,170,170},
+                {85,85,85},{85,85,255},{85,255,85},{85,255,255},{255,85,85},{255,85,255},{255,255,85},{255,255,255}};
+            if(ncol==2){ memset(ega,0,48); ega[3]=ega[4]=ega[5]=255; }
+            else for(int i=0;i<16;i++){ ega[i*3]=def[i][0]; ega[i*3+1]=def[i][1]; ega[i*3+2]=def[i][2]; }
+        }
+        pal=ega;
+    }
     unsigned char* out=(unsigned char*)malloc((size_t)W*H*4); if(!out) return NULL;
     unsigned char* line=(unsigned char*)malloc(total); if(!line){free(out);return NULL;}
     const unsigned char* p=d+128, *end=d+n;
-    const unsigned char* pal=(planes==1 && n>=769 && d[n-769]==0x0C) ? d+n-768 : NULL;
     for(int y=0;y<H;y++){
         int idx=0;
         while(idx<total && p<end){
@@ -69,9 +90,21 @@ static unsigned char* ex_pcx(const unsigned char* d, size_t n, int* w, int* h){
         while(idx<total) line[idx++]=0;
         for(int x=0;x<W;x++){
             unsigned char r,g,b2,a=255;
-            if(planes==1){ unsigned char v=line[x];
-                if(pal){ r=pal[v*3];g=pal[v*3+1];b2=pal[v*3+2]; } else r=g=b2=v;
-            } else { r=line[x]; g=line[bpl+x]; b2=line[2*bpl+x]; if(planes==4) a=line[3*bpl+x]; }
+            if(!indexed){ r=line[x]; g=line[bpl+x]; b2=line[2*bpl+x]; if(planes==4) a=line[3*bpl+x]; }
+            else {
+                unsigned int v=0;
+                if(bpp==8) v=line[x];
+                else {
+                    int per=8/bpp, mask=(1<<bpp)-1;
+                    for(int pl=0;pl<planes;pl++){
+                        int byte=line[(size_t)pl*bpl + x/per];
+                        int sh=(per-1-(x%per))*bpp;
+                        v |= (unsigned)((byte>>sh)&mask) << (pl*bpp);
+                    }
+                }
+                if((int)v>=ncol) v=ncol-1;
+                r=pal[v*3]; g=pal[v*3+1]; b2=pal[v*3+2];
+            }
             unsigned char* o=out+((size_t)y*W+x)*4; o[0]=r;o[1]=g;o[2]=b2;o[3]=a;
         }
     }
@@ -118,16 +151,37 @@ static unsigned char* ex_pfm(const unsigned char* d, size_t n, int* w, int* h){
     *w=W; *h=H; return out;
 }
 
-// ---------------------------------------------------------------- Sun Raster (.ras), no comprimido
+// ---------------------------------------------------------------- Sun Raster (.ras)
+// Tipo 0/1 = crudo; tipo 2 = el RLE de Sun (0x80 <cnt> <val>, y 0x80 0x00 = un 0x80 literal).
 static unsigned char* ex_sun(const unsigned char* d, size_t n, int* w, int* h){
     if(n<32 || ex_be32(d)!=0x59A66A95u) return NULL;
     uint32_t W=ex_be32(d+4),H=ex_be32(d+8),depth=ex_be32(d+12),type=ex_be32(d+20),maplen=ex_be32(d+28);
-    if(!ex_ok(W,H) || type>1) return NULL; // type 0/1 = sin comprimir
+    if(!ex_ok(W,H) || type>2) return NULL;
     if(depth!=8 && depth!=24 && depth!=32) return NULL;
+    if((uint64_t)maplen > n-32) return NULL;
     const unsigned char* cmap=d+32; const unsigned char* p=d+32+maplen;
     int bypp=depth/8; size_t rowbytes=((size_t)W*bypp+1)&~(size_t)1; // padded a 16-bit
-    if(p+rowbytes*H > d+n) return NULL;
-    unsigned char* out=(unsigned char*)malloc((size_t)W*H*4); if(!out) return NULL;
+    unsigned char* unrle=NULL;
+    if(type==2){
+        size_t need=rowbytes*(size_t)H;
+        unrle=(unsigned char*)malloc(need); if(!unrle) return NULL;
+        size_t o=0,i=0,avail=(size_t)(d+n-p);
+        while(o<need && i<avail){
+            unsigned char b=p[i++];
+            if(b!=0x80){ unrle[o++]=b; continue; }
+            if(i>=avail) break;
+            unsigned char cnt=p[i++];
+            if(cnt==0){ unrle[o++]=0x80; continue; }
+            if(i>=avail) break;
+            unsigned char v=p[i++];
+            for(int k=0;k<=cnt && o<need;k++) unrle[o++]=v;
+        }
+        while(o<need) unrle[o++]=0;
+        p=unrle;
+    }
+    if(type!=2 && p+rowbytes*H > d+n){ free(unrle); return NULL; }
+    unsigned char* out=(unsigned char*)malloc((size_t)W*H*4);
+    if(!out){ free(unrle); return NULL; }
     for(uint32_t y=0;y<H;y++){ const unsigned char* row=p+(size_t)y*rowbytes;
         for(uint32_t x=0;x<W;x++){ unsigned char r,g,b,a=255;
             if(depth==8){ unsigned char v=row[x];
@@ -137,6 +191,7 @@ static unsigned char* ex_sun(const unsigned char* d, size_t n, int* w, int* h){
             unsigned char* o=out+((size_t)y*W+x)*4; o[0]=r;o[1]=g;o[2]=b;o[3]=a;
         }
     }
+    free(unrle);
     *w=(int)W; *h=(int)H; return out;
 }
 
@@ -424,7 +479,8 @@ done:
 static unsigned char* ex_ilbm(const unsigned char* d, size_t n, int* w, int* h){
     if(n<32 || memcmp(d,"FORM",4)!=0) return NULL;
     int chunky = !memcmp(d+8,"PBM ",4);            // DPaint IIe: 1 byte por pixel
-    if(!chunky && memcmp(d+8,"ILBM",4)!=0) return NULL;
+    int acbm   = !memcmp(d+8,"ACBM",4);            // AmigaBasic: planos contiguos, sin RLE
+    if(!chunky && !acbm && memcmp(d+8,"ILBM",4)!=0) return NULL;
 
     int W=0,H=0,planes=0,masking=0,compress=0,transp=-1;
     unsigned char cmap[256*3]; int ncol=0; uint32_t camg=0;
@@ -442,7 +498,7 @@ static unsigned char* ex_ilbm(const unsigned char* d, size_t n, int* w, int* h){
             memcpy(cmap,d+p,(size_t)ncol*3);
         } else if(!memcmp(id,"CAMG",4) && sz>=4){
             camg=ex_be32(d+p);
-        } else if(!memcmp(id,"BODY",4)){
+        } else if(!memcmp(id,"BODY",4) || (acbm && !memcmp(id,"ABIT",4))){
             body=d+p; bodyLen=sz;
         }
         p+=sz+(sz&1);                              // los chunks IFF van a byte par
@@ -456,6 +512,9 @@ static unsigned char* ex_ilbm(const unsigned char* d, size_t n, int* w, int* h){
     int layers  = (chunky ? 1 : planes) + (hasMask ? 1 : 0);
     size_t rowb = chunky ? (((size_t)W+1)&~(size_t)1) : ((((size_t)W+15)/16)*2);
     size_t need = rowb*layers*(size_t)H;
+    // ACBM guarda cada plano entero uno atras del otro; ILBM los intercala por fila
+    size_t pstride = acbm ? rowb*(size_t)H : rowb;
+    if(acbm) compress=0;
 
     unsigned char* raw=(unsigned char*)malloc(need); if(!raw) return NULL;
     if(compress==0){
@@ -473,14 +532,14 @@ static unsigned char* ex_ilbm(const unsigned char* d, size_t n, int* w, int* h){
 
     unsigned char* out=(unsigned char*)malloc((size_t)W*H*4);
     if(!out){ free(raw); return NULL; }
-    size_t maskOff = rowb*(size_t)(chunky?1:planes);   // el plano de mascara va ultimo
+    size_t maskOff = pstride*(size_t)(chunky?1:planes);   // el plano de mascara va ultimo
     for(int y=0;y<H;y++){
-        const unsigned char* rp=raw+(size_t)y*rowb*layers;
+        const unsigned char* rp = acbm ? (raw+(size_t)y*rowb) : (raw+(size_t)y*rowb*layers);
         int hr=0,hg=0,hb=0;                        // color "sostenido" del HAM
         for(int x=0;x<W;x++){
             unsigned int idx;
             if(chunky) idx=rp[x];
-            else { idx=0; for(int b=0;b<planes;b++) if((rp[(size_t)b*rowb + x/8]>>(7-(x&7)))&1) idx|=(1u<<b); }
+            else { idx=0; for(int b=0;b<planes;b++) if((rp[(size_t)b*pstride + x/8]>>(7-(x&7)))&1) idx|=(1u<<b); }
             unsigned char* o=out+((size_t)y*W+x)*4; unsigned char a=255;
             if(masking==2 && (int)idx==transp) a=0;    // color-clave declarado en el BMHD
             if(ham){
@@ -788,7 +847,7 @@ static unsigned char* exotic_load(const unsigned char* d, size_t n, const char* 
         if(!strcmp(ext,"pam")) return ex_pam(d,n,w,h);
         if(!strcmp(ext,"xbm")) return ex_xbm(d,n,w,h);
         if(!strcmp(ext,"xpm")) return ex_xpm(d,n,w,h);
-        if(!strcmp(ext,"iff")||!strcmp(ext,"ilbm")||!strcmp(ext,"lbm")) return ex_ilbm(d,n,w,h);
+        if(!strcmp(ext,"iff")||!strcmp(ext,"ilbm")||!strcmp(ext,"lbm")||!strcmp(ext,"acbm")) return ex_ilbm(d,n,w,h);
         if(!strcmp(ext,"mac")||!strcmp(ext,"pntg")||!strcmp(ext,"macp")) return ex_macpaint(d,n,w,h);
         if(!strcmp(ext,"xwd")) return ex_xwd(d,n,w,h);
         if(!strcmp(ext,"dpx")||!strcmp(ext,"cin")) return ex_dpx(d,n,w,h);

@@ -16,6 +16,10 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include "../third_party/stb_image.h"
 #include "../third_party/exotic.h"
+#include "../third_party/retro.h"
+#include "../third_party/sci.h"
+#include "../third_party/texture.h"
+#include "../third_party/xcf.h"
 #include "../third_party/unpack.h"
 
 // ---------------------------------------------------------------- andamiaje
@@ -44,14 +48,18 @@ static bool slurp(const char* name, std::vector<unsigned char>& buf) {
     return rd == buf.size() && !buf.empty();
 }
 
-// Decodifica una muestra con exotic_load. Devuelve RGBA (free por el caller).
-static unsigned char* decode(const char* name, const char* ext, int* w, int* h) {
+// Decodifica una muestra con el despachador que le corresponda.
+typedef unsigned char* (*LoadFn)(const unsigned char*, size_t, const char*, int*, int*);
+static unsigned char* decodeVia(LoadFn fn, const char* name, const char* ext, int* w, int* h) {
     g_case = name;
     std::vector<unsigned char> buf;
     if (!slurp(name, buf)) { ok(false, "no se pudo leer el archivo"); return nullptr; }
-    unsigned char* px = exotic_load(buf.data(), buf.size(), ext, w, h);
-    ok(px != nullptr, "exotic_load devolvio NULL");
+    unsigned char* px = fn(buf.data(), buf.size(), ext, w, h);
+    ok(px != nullptr, "el decoder devolvio NULL");
     return px;
+}
+static unsigned char* decode(const char* name, const char* ext, int* w, int* h) {
+    return decodeVia(exotic_load, name, ext, w, h);
 }
 
 static void dims(const unsigned char* px, int w, int h, int ew, int eh) {
@@ -219,6 +227,213 @@ static void testContainers() {
     } else ok(false, "no se pudo leer");
 }
 
+// ------------------------------------------------- formatos de 8 y 16 bits
+static void testAcbm() {
+    int w, h;
+    if (unsigned char* p = decode("ref.acbm", "acbm", &w, &h)) {
+        dims(p, w, h, 4, 2); refGrid(p, w, h); free(p);
+    }
+}
+
+static void testSunRle() {
+    int w, h;
+    if (unsigned char* p = decode("rle.ras", "ras", &w, &h)) {
+        dims(p, w, h, 4, 2); refGrid(p, w, h); free(p);
+    }
+}
+
+static void testPcx() {
+    int w, h;
+    if (unsigned char* p = decode("ref8.pcx", "pcx", &w, &h)) {      // 256 colores
+        dims(p, w, h, 4, 2); refGrid(p, w, h); free(p);
+    }
+    if (unsigned char* p = decode("ref4.pcx", "pcx", &w, &h)) {      // 16 colores EGA
+        dims(p, w, h, 4, 2); refGrid(p, w, h); free(p);
+    }
+    if (unsigned char* p = decode("ref1.pcx", "pcx", &w, &h)) {      // monocromo
+        dims(p, w, h, 4, 2);
+        pix(p, w, h, 0, 0, 255, 255, 255, 255);
+        pix(p, w, h, 1, 0, 0, 0, 0, 255);
+        pix(p, w, h, 0, 1, 0, 0, 0, 255);
+        pix(p, w, h, 1, 1, 255, 255, 255, 255);
+        free(p);
+    }
+    if (unsigned char* p = decodeVia(retro_load, "ref.dcx", "dcx", &w, &h)) {
+        dims(p, w, h, 4, 2); refGrid(p, w, h); free(p);
+    }
+}
+
+// Los 8 colores exactos de la paleta de 3 bits del ST.
+static const int ST[8][3] = { {255,0,0},{0,255,0},{0,0,255},{255,255,255},
+                              {0,0,0},{255,255,0},{0,255,255},{255,0,255} };
+static void stRow(const unsigned char* p, int w, int h) {
+    if (!p) return;
+    for (int x = 0; x < 8; x++) pix(p, w, h, x, 0, ST[x][0], ST[x][1], ST[x][2], 255);
+    pix(p, w, h, 0, 1, 0, 0, 0, 255);            // el resto de la pantalla es negro
+    pix(p, w, h, 319, 199, 0, 0, 0, 255);
+}
+static void testAtari() {
+    int w, h;
+    for (const char* f : { "ref.pi1", "ref.pc1" }) {                 // Degas y Degas Elite
+        if (unsigned char* p = decodeVia(retro_load, f, "pi1", &w, &h)) {
+            dims(p, w, h, 320, 200); stRow(p, w, h); free(p);
+        }
+    }
+    if (unsigned char* p = decodeVia(retro_load, "ref.neo", "neo", &w, &h)) {
+        dims(p, w, h, 320, 200); stRow(p, w, h); free(p);
+    }
+}
+
+static void testZx() {
+    int w, h;
+    if (unsigned char* p = decodeVia(retro_load, "ref.scr", "scr", &w, &h)) {
+        dims(p, w, h, 256, 192);
+        pix(p, w, h, 0, 0, 255, 0, 0, 255);        // tinta 2 con brillo
+        pix(p, w, h, 3, 0, 255, 0, 0, 255);
+        pix(p, w, h, 4, 0, 0, 255, 255, 255);      // papel 5 con brillo
+        pix(p, w, h, 0, 191, 255, 0, 0, 255);      // ultima fila (direccionamiento raro)
+        free(p);
+    }
+}
+
+static void testKoala() {
+    int w, h;
+    if (unsigned char* p = decodeVia(retro_load, "ref.koa", "koa", &w, &h)) {
+        dims(p, w, h, 320, 200);
+        pix(p, w, h, 0, 0, 0, 0, 0, 255);          // 00 -> fondo
+        pix(p, w, h, 2, 0, 255, 255, 255, 255);    // 01 -> pantalla, nibble alto
+        pix(p, w, h, 4, 0, 104, 55, 43, 255);      // 10 -> pantalla, nibble bajo (rojo C64)
+        pix(p, w, h, 6, 0, 112, 164, 178, 255);    // 11 -> RAM de color (cian C64)
+        pix(p, w, h, 7, 0, 112, 164, 178, 255);    // doble ancho
+        free(p);
+    }
+}
+
+static void testGem() {
+    int w, h;
+    if (unsigned char* p = decodeVia(retro_load, "ref.img", "img", &w, &h)) {
+        dims(p, w, h, 16, 2);
+        pix(p, w, h, 0, 0, 0, 0, 0, 255);          // 0xF0: 4 negros…
+        pix(p, w, h, 4, 0, 255, 255, 255, 255);    // …y 4 blancos
+        pix(p, w, h, 15, 0, 0, 0, 0, 255);         // 0x0F al final
+        pix(p, w, h, 0, 1, 255, 255, 255, 255);    // run solido de ceros
+        free(p);
+    }
+}
+
+static void testTim() {
+    int w, h;
+    if (unsigned char* p = decodeVia(retro_load, "ref.tim", "tim", &w, &h)) {
+        dims(p, w, h, 8, 2);
+        // CLUT de 15 bits (BGR555): el gris no es exacto, asi que la paleta usa
+        // solo colores puros. Fila 0: rojo, verde, azul, blanco.
+        pix(p, w, h, 0, 0, 255, 0, 0, 255);
+        pix(p, w, h, 1, 0, 0, 255, 0, 255);
+        pix(p, w, h, 2, 0, 0, 0, 255, 255);
+        pix(p, w, h, 3, 0, 255, 255, 255, 255);
+        pix(p, w, h, 0, 1, 0, 0, 0, 255);          // negro con STP: opaco
+        pix(p, w, h, 1, 1, 255, 255, 0, 255);
+        pix(p, w, h, 2, 1, 0, 255, 255, 255);
+        pix(p, w, h, 3, 1, 0, 0, 0, 0);            // negro sin STP = transparente
+        free(p);
+    }
+}
+
+static void testPix() {
+    int w, h;
+    if (unsigned char* p = decodeVia(retro_load, "ref.pix", "pix", &w, &h)) {
+        dims(p, w, h, 4, 2); refGrid(p, w, h); free(p);
+    }
+}
+
+// Photo CD: 768 KB de muestra serian demasiado para el repo, asi que se arma
+// una en memoria (croma neutra -> gris = luma * 1.3584).
+static void testPcd() {
+    g_case = "pcd";
+    std::vector<unsigned char> b(0xC0000, 0);
+    memcpy(&b[0x800], "PCD_IPI", 7);
+    for (int pair = 0; pair < 256; pair++) {
+        unsigned char* q = &b[0x30000 + (size_t)pair * 2304];
+        for (int x = 0; x < 768; x++) { q[x] = 100; q[768 + x] = 200; }
+        for (int x = 0; x < 384; x++) { q[1536 + x] = 156; q[1920 + x] = 137; }
+    }
+    int w = 0, h = 0;
+    unsigned char* p = retro_load(b.data(), b.size(), "pcd", &w, &h);
+    ok(p != nullptr, "retro_load devolvio NULL");
+    if (p) {
+        dims(p, w, h, 768, 512);
+        pix(p, w, h, 0, 0, 135, 135, 135, 255, 1);
+        pix(p, w, h, 0, 1, 255, 255, 255, 255);    // 200*1.3584 se pasa de 255
+        free(p);
+    }
+}
+
+// ------------------------------------------------------------- texturas BCn
+static void bcRows(const unsigned char* p, int w, int h, bool flipped) {
+    if (!p) return;
+    const int C[4][3] = { {255,0,0}, {0,0,255}, {170,0,85}, {85,0,170} };
+    for (int y = 0; y < 4; y++) {
+        const int* c = C[flipped ? 3 - y : y];
+        pix(p, w, h, 0, y, c[0], c[1], c[2], 255);
+        pix(p, w, h, 3, y, c[0], c[1], c[2], 255);
+    }
+}
+static void testTextures() {
+    int w, h;
+    if (unsigned char* p = decodeVia(texture_load, "bc1.dds", "dds", &w, &h)) {
+        dims(p, w, h, 4, 4); bcRows(p, w, h, false); free(p);
+    }
+    if (unsigned char* p = decodeVia(texture_load, "bc3.dds", "dds", &w, &h)) {
+        dims(p, w, h, 4, 4);
+        pix(p, w, h, 0, 0, 255, 0, 0, 255);        // alfa 255 arriba
+        pix(p, w, h, 0, 3, 85, 0, 170, 0);         // alfa 0 abajo
+        free(p);
+    }
+    if (unsigned char* p = decodeVia(texture_load, "ref.vtf", "vtf", &w, &h)) {
+        dims(p, w, h, 4, 4); bcRows(p, w, h, false); free(p);
+    }
+    if (unsigned char* p = decodeVia(texture_load, "ref.ktx", "ktx", &w, &h)) {
+        dims(p, w, h, 4, 4); bcRows(p, w, h, true); free(p);   // OpenGL: al reves
+    }
+}
+
+// -------------------------------------------------- cientificas: FITS y DICOM
+static void testSci() {
+    int w, h;
+    if (unsigned char* p = decodeVia(sci_load, "ref.fits", "fits", &w, &h)) {
+        dims(p, w, h, 4, 2);
+        // FITS arranca por abajo: la 1a fila del archivo termina abajo de todo
+        pix(p, w, h, 0, 0, 255, 255, 255, 255);
+        pix(p, w, h, 3, 0, 0, 0, 0, 255);
+        pix(p, w, h, 1, 1, 85, 85, 85, 255, 1);
+        free(p);
+    }
+    if (unsigned char* p = decodeVia(sci_load, "ref.dcm", "dcm", &w, &h)) {
+        dims(p, w, h, 4, 2);
+        pix(p, w, h, 0, 0, 0, 0, 0, 255);
+        pix(p, w, h, 3, 0, 255, 255, 255, 255);
+        pix(p, w, h, 1, 1, 170, 170, 170, 255, 1);
+        free(p);
+    }
+    // VR implicita + MONOCHROME1 (los valores se invierten)
+    if (unsigned char* p = decodeVia(sci_load, "impl.dcm", "dcm", &w, &h)) {
+        dims(p, w, h, 4, 2);
+        pix(p, w, h, 0, 0, 255, 255, 255, 255);
+        pix(p, w, h, 3, 0, 0, 0, 0, 255);
+        free(p);
+    }
+}
+
+// ------------------------------------------------------------------- XCF
+static void testXcf() {
+    int w, h;
+    for (const char* f : { "v1.xcf", "v11.xcf" }) {   // punteros de 32 y de 64 bits
+        if (unsigned char* p = decodeVia(xcf_load, f, "xcf", &w, &h)) {
+            dims(p, w, h, 4, 2); refGrid(p, w, h); free(p);
+        }
+    }
+}
+
 // Nada de esto es una imagen valida: lo que importa es que devuelva NULL sin
 // romperse ni leerse de rango (los buffers no estan NUL-terminados).
 static void testGarbage() {
@@ -233,8 +448,42 @@ static void testGarbage() {
         ok(p == nullptr, "'%s' acepto basura (%dx%d)", exts[k], w, h);
         free(p);
     }
-    // cabeceras validas pero con el cuerpo cortado
+    // lo mismo para los despachadores nuevos
+    static const char* rexts[] = { "pi1","pc1","neo","scr","koa","img","tim","pix","dcx","pcd", nullptr };
+    for (int k = 0; rexts[k]; k++) {
+        int w = 0, h = 0;
+        unsigned char* p = retro_load(junk, sizeof junk, rexts[k], &w, &h);
+        ok(p == nullptr, "retro '%s' acepto basura (%dx%d)", rexts[k], w, h);
+        free(p);
+    }
+    static const char* sexts[] = { "fits","dcm", nullptr };
+    for (int k = 0; sexts[k]; k++) {
+        int w = 0, h = 0;
+        unsigned char* p = sci_load(junk, sizeof junk, sexts[k], &w, &h);
+        ok(p == nullptr, "sci '%s' acepto basura (%dx%d)", sexts[k], w, h);
+        free(p);
+    }
+    static const char* texts[] = { "dds","vtf","ktx", nullptr };
+    for (int k = 0; texts[k]; k++) {
+        int w = 0, h = 0;
+        unsigned char* p = texture_load(junk, sizeof junk, texts[k], &w, &h);
+        ok(p == nullptr, "texture '%s' acepto basura (%dx%d)", texts[k], w, h);
+        free(p);
+    }
+    // cabeceras validas con el cuerpo cortado, para los nuevos
     std::vector<unsigned char> buf;
+    const char* rfiles[] = { "ref.pi1", "ref.tim", "ref.koa", "bc1.dds", "ref.dcm", nullptr };
+    const char* rfexts[] = { "pi1", "tim", "koa", "dds", "dcm", nullptr };
+    LoadFn rfns[] = { retro_load, retro_load, retro_load, texture_load, sci_load, nullptr };
+    for (int k = 0; rfiles[k]; k++) {
+        if (!slurp(rfiles[k], buf)) continue;
+        for (size_t cut : { (size_t)16, buf.size() / 3, buf.size() / 2 }) {
+            int w = 0, h = 0;
+            free(rfns[k](buf.data(), cut, rfexts[k], &w, &h));
+        }
+        ok(true, "%s truncado no rompe", rfiles[k]);
+    }
+    // cabeceras validas pero con el cuerpo cortado
     const char* files[] = { "ilbm_raw.iff", "ref.xwd", "ref10.dpx", "rle.icns", "ref.mac", nullptr };
     const char* fexts[] = { "iff", "xwd", "dpx", "icns", "mac", nullptr };
     for (int k = 0; files[k]; k++) {
@@ -264,6 +513,19 @@ int main() {
     testDpx();
     testIcns();
     testContainers();
+    testAcbm();
+    testSunRle();
+    testPcx();
+    testAtari();
+    testZx();
+    testKoala();
+    testGem();
+    testTim();
+    testPix();
+    testPcd();
+    testTextures();
+    testSci();
+    testXcf();
     testGarbage();
     printf("\n%d asserts, %d fallaron\n", checks, fails);
     if (!fails) printf("todo OK\n");

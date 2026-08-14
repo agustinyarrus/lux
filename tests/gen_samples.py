@@ -308,6 +308,13 @@ def gen_containers():
           + body + struct.pack("<II", zlib.crc32(svg) & 0xFFFFFFFF, len(svg)))
     write("ref.svgz", gz)
 
+    # cualquier formato soportado, gzipeado: la extension util es la de adentro
+    ppm = b"P6\n4 2\n255\n" + b"".join(bytes(RGB[y][x]) for y in range(H) for x in range(W))
+    co2 = zlib.compressobj(9, zlib.DEFLATED, -zlib.MAX_WBITS)
+    gz2 = co2.compress(ppm) + co2.flush()
+    write("ref.ppm.gz", b"\x1f\x8b\x08\x00" + b"\x00" * 4 + b"\x00\x03" + gz2
+                        + struct.pack("<II", zlib.crc32(ppm) & 0xFFFFFFFF, len(ppm)))
+
     merged = png_bytes(W, H, ref_rgba())
 
     def zipfile_bytes(entries):
@@ -355,9 +362,430 @@ def gen_containers():
     write("ref.ani", b"RIFF" + struct.pack("<I", len(body)) + body)
 
 
+# ------------------------------------------------------------------ ACBM
+def gen_acbm():
+    """IFF ACBM: los planos van enteros uno atras del otro, no intercalados."""
+    rowb = ((W + 15) // 16) * 2
+    body = bytearray()
+    for p in range(3):
+        for y in range(H):
+            plane = bytearray(rowb)
+            for x in range(W):
+                if (IDX[y][x] >> p) & 1:
+                    plane[x // 8] |= 0x80 >> (x & 7)
+            body += plane
+    write("ref.acbm", _iff(b"ACBM", [
+        _chunk(b"BMHD", _bmhd(W, H, 3, 0, 0)),
+        _chunk(b"CMAP", b"".join(bytes(c) for c in PAL)),
+        _chunk(b"ABIT", bytes(body))]))
+
+
+# ------------------------------------------------------- Sun Raster con RLE
+def gen_sun_rle():
+    """Tipo 2: 0x80 <cnt> <val> repite val cnt+1 veces; 0x80 0x00 es un 0x80 literal."""
+    rowb = ((W * 3) + 1) & ~1                      # 24 bits, filas a byte par
+    raw = bytearray()
+    for y in range(H):
+        row = bytearray()
+        for x in range(W):
+            r, g, b = RGB[y][x]
+            row += bytes((b, g, r))                # Sun guarda BGR
+        raw += row + bytes(rowb - len(row))
+    enc = bytearray()
+    i = 0
+    while i < len(raw):
+        run = 1
+        while i + run < len(raw) and run < 256 and raw[i + run] == raw[i]:
+            run += 1
+        if run >= 3:
+            enc += bytes((0x80, run - 1, raw[i])); i += run
+        elif raw[i] == 0x80:
+            enc += b"\x80\x00"; i += 1
+        else:
+            enc.append(raw[i]); i += 1
+    hdr = struct.pack(">8I", 0x59A66A95, W, H, 24, len(enc), 2, 0, 0)
+    write("rle.ras", hdr + bytes(enc))
+
+
+# ------------------------------------------------------------------- PCX/DCX
+def _pcx_rle(rows):
+    """RLE de PCX, fila por fila (un run nunca cruza la scanline)."""
+    out = bytearray()
+    for data in rows:
+        i = 0
+        while i < len(data):
+            run = 1
+            while i + run < len(data) and run < 63 and data[i + run] == data[i]:
+                run += 1
+            if run > 1 or data[i] >= 0xC0:
+                out += bytes((0xC0 | run, data[i])); i += run
+            else:
+                out.append(data[i]); i += 1
+    return bytes(out)
+
+
+def _pcx(bpp, planes, bpl, rows, ega=None, vga=None):
+    hdr = bytearray(128)
+    hdr[0] = 0x0A; hdr[1] = 5; hdr[2] = 1; hdr[3] = bpp
+    struct.pack_into("<HHHH", hdr, 4, 0, 0, W - 1, H - 1)
+    struct.pack_into("<HH", hdr, 12, 72, 72)
+    if ega:
+        for i, c in enumerate(ega[:16]):
+            hdr[16 + i*3: 19 + i*3] = bytes(c)
+    hdr[65] = planes
+    struct.pack_into("<H", hdr, 66, bpl)
+    struct.pack_into("<H", hdr, 68, 1)
+    body = bytes(hdr) + _pcx_rle(rows)
+    if vga:
+        body += b"\x0c" + b"".join(bytes(c) for c in vga) + b"\x00" * (768 - 3 * len(vga))
+    return body
+
+
+def gen_pcx():
+    # 8 bits con paleta VGA al final
+    rows8 = [bytes(IDX[y]) for y in range(H)]
+    write("ref8.pcx", _pcx(8, 1, W, rows8, vga=PAL))
+    # 4 bits (2 pixeles por byte) con la paleta EGA de la cabecera
+    rows4 = []
+    for y in range(H):
+        row = bytearray(2)
+        for x in range(W):
+            row[x // 2] |= IDX[y][x] << (4 if x % 2 == 0 else 0)
+        rows4.append(bytes(row))
+    write("ref4.pcx", _pcx(4, 1, 2, rows4, ega=PAL + [(0, 0, 0)] * 8))
+    # 1 bit: patron 1010 / 0101 con paleta negro-blanco
+    rows1 = [bytes((0xA0,)), bytes((0x50,))]
+    write("ref1.pcx", _pcx(1, 1, 1, rows1, ega=[(0, 0, 0), (255, 255, 255)] + [(0, 0, 0)] * 14))
+    # DCX: magic + tabla de offsets (terminada en 0) + el PCX de 8 bits
+    pcx = _pcx(8, 1, W, rows8, vga=PAL)
+    write("ref.dcx", struct.pack("<III", 0x3ADE68B1, 12, 0) + pcx)
+
+
+# ------------------------------------------------------------- Atari ST
+# Paleta de 3 bits por canal: solo colores exactos (0 o 7 por componente).
+ST_PAL = [(7,0,0), (0,7,0), (0,0,7), (7,7,7), (0,0,0), (7,7,0), (0,7,7), (7,0,7)]
+ST_RGB = [(255,0,0), (0,255,0), (0,0,255), (255,255,255),
+          (0,0,0), (255,255,0), (0,255,255), (255,0,255)]
+ST_W, ST_H = 320, 200
+
+
+def _st_idx(x, y):
+    """Fila 0: los 8 colores en los primeros 8 pixeles. El resto, negro (indice 4)."""
+    return (x % 8) if y == 0 else 4
+
+
+def _st_palette_words():
+    return b"".join(struct.pack(">H", (r << 8) | (g << 4) | b) for r, g, b in ST_PAL) \
+           + b"".join(struct.pack(">H", 0) for _ in range(16 - len(ST_PAL)))
+
+
+def _st_screen_words():
+    """Bitplanes intercalados de a palabras: 4 words por cada 16 pixeles."""
+    out = bytearray()
+    for y in range(ST_H):
+        for grp in range(ST_W // 16):
+            words = [0] * 4
+            for bit in range(16):
+                x = grp * 16 + bit
+                idx = _st_idx(x, y)
+                for p in range(4):
+                    if (idx >> p) & 1:
+                        words[p] |= 1 << (15 - bit)
+            for p in range(4):
+                out += struct.pack(">H", words[p])
+    return bytes(out)
+
+
+def gen_atari():
+    pal = _st_palette_words()
+    write("ref.pi1", struct.pack(">H", 0) + pal + _st_screen_words())
+    write("ref.neo", struct.pack(">HH", 0, 0) + pal + b"\x00" * (128 - 4 - 32) + _st_screen_words())
+    # Degas Elite: PackBits sobre el layout "por scanline, plano tras plano"
+    lines = bytearray()
+    for y in range(ST_H):
+        for p in range(4):
+            plane = bytearray(ST_W // 8)
+            for x in range(ST_W):
+                if (_st_idx(x, y) >> p) & 1:
+                    plane[x // 8] |= 0x80 >> (x & 7)
+            lines += plane
+    write("ref.pc1", struct.pack(">H", 0x8000) + pal + _packbits(bytes(lines)))
+
+
+# --------------------------------------------------------------- ZX Spectrum
+def gen_zx():
+    """6912 B. Pixeles 0xF0 (4 tinta + 4 papel) y atributo tinta=2 papel=5 bright."""
+    px = bytearray(6144)
+    for i in range(6144):
+        px[i] = 0xF0
+    attr = bytes([2 | (5 << 3) | 0x40] * 768)      # tinta roja, papel cian, brillo
+    write("ref.scr", bytes(px) + attr)
+
+
+# ------------------------------------------------------------- C64 Koala
+def gen_koala():
+    """El byte 0x1B da los 4 pares 00,01,10,11: fondo, pantalla-alto, pantalla-bajo, color."""
+    bmp = bytearray(8000)
+    for i in range(8000):
+        bmp[i] = 0x1B
+    scr = bytes([0x12] * 1000)                     # alto=1 (blanco), bajo=2 (rojo)
+    col = bytes([0x03] * 1000)                     # cian
+    write("ref.koa", struct.pack("<H", 0x6000) + bytes(bmp) + scr + col + b"\x00")
+
+
+# ----------------------------------------------------------------- GEM IMG
+def gen_gem():
+    hdr = struct.pack(">8H", 1, 8, 1, 2, 372, 372, 16, 2)
+    data = b"\x80\x02\xF0\x0F" + b"\x02"           # literal de 2 bytes; run solido de 2 ceros
+    write("ref.img", hdr + data)
+
+
+# ------------------------------------------------------------- PlayStation TIM
+def gen_tim():
+    clut = [(31,0,0,1), (0,31,0,1), (0,0,31,1), (31,31,31,1),
+            (0,0,0,1), (31,31,0,1), (0,31,31,1), (0,0,0,0)]   # el ultimo: negro transparente
+    cols = b"".join(struct.pack("<H", r | (g << 5) | (b << 10) | (s << 15)) for r, g, b, s in clut)
+    clut_blk = struct.pack("<IHHHH", 12 + len(cols), 0, 0, 8, 1) + cols
+    px = bytearray()
+    for y in range(H):
+        for x in range(W):
+            px.append(IDX[y][x])
+        px += bytes(4)                              # relleno hasta 8 bytes de fila
+    img_blk = struct.pack("<IHHHH", 12 + len(px), 0, 0, 4, H) + bytes(px)
+    write("ref.tim", struct.pack("<II", 0x10, 0x09) + clut_blk + img_blk)
+
+
+# --------------------------------------------------------------- Alias PIX
+def gen_pix():
+    body = bytearray()
+    for y in range(H):
+        for x in range(W):
+            r, g, b = RGB[y][x]
+            body += bytes((1, b, g, r))            # RLE de 1 pixel: cuenta + BGR
+    write("ref.pix", struct.pack(">5H", W, H, 0, 0, 24) + bytes(body))
+
+
+# ------------------------------------------------------------ DDS / VTF / KTX
+def _bc1_block():
+    """4x4: fila 0 = c0 (rojo), fila 1 = c1 (azul), filas 2 y 3 = los interpolados."""
+    bits = 0
+    for y in range(4):
+        for x in range(4):
+            bits |= y << ((y * 4 + x) * 2)
+    return struct.pack("<HHI", 0xF800, 0x001F, bits)
+
+
+def _bc3_block():
+    """Alfa: a0=255 a1=0; filas 0-1 opacas (indice 0), filas 2-3 transparentes (indice 1)."""
+    idx = 0
+    for i in range(16):
+        idx |= (0 if i < 8 else 1) << (i * 3)
+    alpha = bytes((255, 0)) + idx.to_bytes(6, "little")
+    return alpha + _bc1_block()
+
+
+def gen_dds():
+    def dds(fourcc, data, w=4, h=4):
+        hdr = bytearray(128)
+        hdr[0:4] = b"DDS "
+        struct.pack_into("<I", hdr, 4, 124)
+        struct.pack_into("<I", hdr, 8, 0x1007)      # caps|height|width|pixelformat
+        struct.pack_into("<I", hdr, 12, h)
+        struct.pack_into("<I", hdr, 16, w)
+        struct.pack_into("<I", hdr, 20, len(data))
+        struct.pack_into("<I", hdr, 76, 32)         # tamaño del pixelformat
+        struct.pack_into("<I", hdr, 80, 4)          # DDPF_FOURCC
+        hdr[84:88] = fourcc
+        struct.pack_into("<I", hdr, 108, 0x1000)    # DDSCAPS_TEXTURE
+        return bytes(hdr) + data
+    write("bc1.dds", dds(b"DXT1", _bc1_block()))
+    write("bc3.dds", dds(b"DXT5", _bc3_block()))
+
+    # VTF 7.2 con un solo mip DXT1: el nivel 0 es lo ultimo del archivo
+    vtf = bytearray(80)
+    vtf[0:4] = b"VTF\x00"
+    struct.pack_into("<II", vtf, 4, 7, 2)
+    struct.pack_into("<I", vtf, 12, 80)
+    struct.pack_into("<HH", vtf, 16, 4, 4)
+    struct.pack_into("<I", vtf, 20, 0)
+    struct.pack_into("<HH", vtf, 24, 1, 0)
+    struct.pack_into("<I", vtf, 52, 13)             # IMAGE_FORMAT_DXT1
+    vtf[56] = 1                                     # un solo mip
+    struct.pack_into("<I", vtf, 57, 0xFFFFFFFF)     # sin miniatura de baja resolucion
+    write("ref.vtf", bytes(vtf) + _bc1_block())
+
+    # KTX 1.1 con DXT1 (OpenGL: la imagen va de abajo hacia arriba)
+    ktx = bytearray()
+    ktx += bytes((0xAB, 0x4B, 0x54, 0x58, 0x20, 0x31, 0x31, 0xBB, 0x0D, 0x0A, 0x1A, 0x0A))
+    ktx += struct.pack("<I", 0x04030201)
+    ktx += struct.pack("<IIIII", 0, 1, 0, 0x83F0, 0x1907)   # type, typeSize, format, internal, base
+    ktx += struct.pack("<IIIIIII", 4, 4, 0, 0, 1, 1, 0)     # w, h, depth, arrays, faces, mips, kv
+    blk = _bc1_block()
+    ktx += struct.pack("<I", len(blk)) + blk
+    write("ref.ktx", bytes(ktx))
+
+
+# ------------------------------------------------------------------ FITS
+def gen_fits():
+    def card(k, v=None):
+        if v is None:
+            return k.ljust(80).encode()
+        return ("%-8s= %20s" % (k, v)).ljust(80).encode()
+    hdr = (card("SIMPLE", "T") + card("BITPIX", "8") + card("NAXIS", "2")
+           + card("NAXIS1", "4") + card("NAXIS2", "2") + card("END"))
+    hdr += b" " * (2880 - len(hdr) % 2880)
+    # FITS arranca por la fila de abajo: la 1a fila del archivo es la ultima de la imagen
+    data = bytes((0, 85, 170, 255, 255, 170, 85, 0))
+    data += b"\x00" * (2880 - len(data) % 2880)
+    write("ref.fits", hdr + data)
+
+
+# ----------------------------------------------------------------- DICOM
+def _dcm_elem(group, elem, vr, value):
+    if len(value) % 2:
+        value += b"\x00" if vr in (b"UI", b"OB") else b" "
+    b = struct.pack("<HH", group, elem) + vr
+    if vr in (b"OB", b"OW", b"OF", b"SQ", b"UT", b"UN"):
+        b += b"\x00\x00" + struct.pack("<I", len(value))
+    else:
+        b += struct.pack("<H", len(value))
+    return b + value
+
+
+def _dcm_impl(group, elem, value):
+    if len(value) % 2:
+        value += b"\x00"
+    return struct.pack("<HHI", group, elem, len(value)) + value
+
+
+def gen_dicom():
+    px = bytes((0, 85, 170, 255, 255, 170, 85, 0))
+    us = lambda v: struct.pack("<H", v)
+    body = (_dcm_elem(0x0028, 0x0002, b"US", us(1))
+            + _dcm_elem(0x0028, 0x0004, b"CS", b"MONOCHROME2")
+            + _dcm_elem(0x0028, 0x0010, b"US", us(2))          # filas
+            + _dcm_elem(0x0028, 0x0011, b"US", us(4))          # columnas
+            + _dcm_elem(0x0028, 0x0100, b"US", us(8))
+            + _dcm_elem(0x0028, 0x0101, b"US", us(8))
+            + _dcm_elem(0x0028, 0x0103, b"US", us(0))
+            + _dcm_elem(0x7FE0, 0x0010, b"OB", px))
+    ts = b"1.2.840.10008.1.2.1\x00"
+    meta = _dcm_elem(0x0002, 0x0010, b"UI", ts)
+    meta = _dcm_elem(0x0002, 0x0000, b"UL", struct.pack("<I", len(meta))) + meta
+    write("ref.dcm", b"\x00" * 128 + b"DICM" + meta + body)
+
+    # variante en VR implicita (transfer syntax 1.2.840.10008.1.2), la del ACR-NEMA
+    ibody = (_dcm_impl(0x0028, 0x0002, us(1))
+             + _dcm_impl(0x0028, 0x0004, b"MONOCHROME1 ")      # invertida a proposito
+             + _dcm_impl(0x0028, 0x0010, us(2))
+             + _dcm_impl(0x0028, 0x0011, us(4))
+             + _dcm_impl(0x0028, 0x0100, us(8))
+             + _dcm_impl(0x0028, 0x0101, us(8))
+             + _dcm_impl(0x0028, 0x0103, us(0))
+             + _dcm_impl(0x7FE0, 0x0010, px))
+    ts2 = b"1.2.840.10008.1.2\x00"
+    meta2 = _dcm_elem(0x0002, 0x0010, b"UI", ts2)
+    meta2 = _dcm_elem(0x0002, 0x0000, b"UL", struct.pack("<I", len(meta2))) + meta2
+    write("impl.dcm", b"\x00" * 128 + b"DICM" + meta2 + ibody)
+
+
+# --------------------------------------------- TIFF con orientacion EXIF
+def gen_tiff_rot():
+    """1200x700 en gris con Orientation=6: Lux tiene que mostrarlo girado (700x1200),
+    o sea con la ventana mas alta que ancha. Tiene que ser bastante mas grande que
+    el minimo de ventana (420x280 logicos) para que la prueba signifique algo.
+    Va con PackBits para que el archivo no pese: cada fila es de un solo tono."""
+    w2, h2 = 1200, 700
+    data = b"".join(_packbits(bytes([y * 255 // (h2 - 1)] * w2)) for y in range(h2))
+    ifd_off, n = 8, 10
+    data_off = ifd_off + 2 + 12 * n + 4
+    entries = [
+        (256, 3, 1, w2),          # ImageWidth
+        (257, 3, 1, h2),          # ImageLength
+        (258, 3, 1, 8),           # BitsPerSample
+        (259, 3, 1, 32773),       # Compression: PackBits
+        (262, 3, 1, 1),           # PhotometricInterpretation: gris, 0 = negro
+        (273, 4, 1, data_off),    # StripOffsets
+        (274, 3, 1, 6),           # Orientation = 6 (girar 90 horario)
+        (277, 3, 1, 1),           # SamplesPerPixel
+        (278, 3, 1, h2),          # RowsPerStrip
+        (279, 4, 1, len(data)),   # StripByteCounts
+    ]
+    ifd = struct.pack("<H", n)
+    for tag, typ, cnt, val in entries:
+        ifd += struct.pack("<HHII", tag, typ, cnt, val)
+    ifd += struct.pack("<I", 0)
+    write("rot90.tif", b"II\x2a\x00" + struct.pack("<I", ifd_off) + ifd + data)
+
+
+# ------------------------------------------------------------------- WMF
+def gen_wmf():
+    """WMF placeable con un rectangulo rojo de 200x120: prueba el camino GDI."""
+    def rec(func, params):
+        return (struct.pack("<IH", 3 + len(params), func)
+                + b"".join(struct.pack("<H", p & 0xFFFF) for p in params))
+    body = (rec(0x020B, (0, 0))                 # SetWindowOrg (y, x)
+            + rec(0x020C, (120, 200))           # SetWindowExt (y, x)
+            + rec(0x02FC, (0, 0x00FF, 0, 0))    # CreateBrushIndirect: solido, rojo
+            + rec(0x012D, (0,))                 # SelectObject
+            + rec(0x041B, (120, 200, 0, 0))     # Rectangle (bottom, right, top, left)
+            + rec(0x0000, ()))                  # fin del metarchivo
+    hdr = struct.pack("<HHHIHIH", 1, 9, 0x0300, (18 + len(body)) // 2, 1, 7, 0)
+    place = bytearray(struct.pack("<IHhhhhHIH", 0x9AC6CDD7, 0, 0, 0, 200, 120, 96, 0, 0))
+    chk = 0
+    for i in range(10):
+        chk ^= struct.unpack_from("<H", place, i * 2)[0]
+    struct.pack_into("<H", place, 20, chk)
+    write("ref.wmf", bytes(place) + hdr + body)
+
+
+# ------------------------------------------------------------------- XCF
+def gen_xcf(ver, name):
+    """XCF de una capa RGBA con los 8 colores, comprimido con el RLE de GIMP.
+    ver=1 usa punteros de 32 bits; ver=11 los de 64 y agrega el campo precision."""
+    p64 = ver >= 11
+    def ptr(v):
+        return struct.pack(">Q", v) if p64 else struct.pack(">I", v)
+    psz = 8 if p64 else 4
+    def prop(t, payload):
+        return struct.pack(">II", t, len(payload)) + payload
+
+    # tile con RLE: un plano por canal; cada plano entra en un literal corto
+    planes = []
+    for ch in range(4):
+        vals = bytes([([RGB[y][x][0], RGB[y][x][1], RGB[y][x][2], 255][ch])
+                      for y in range(H) for x in range(W)])
+        planes.append(bytes((256 - len(vals),)) + vals)
+    tile = b"".join(planes)
+
+    magic = b"gimp xcf file\x00" if ver == 0 else ("gimp xcf v%03d\x00" % ver).encode()
+    head = magic + struct.pack(">III", W, H, 0)
+    if ver >= 4:
+        head += struct.pack(">I", 150)          # precision: 8 bits con gamma
+    head += prop(17, b"\x01") + prop(0, b"")    # compresion RLE + fin
+    lists_len = psz * 2 + psz                   # [capa, 0] + [0]
+    layer_off = len(head) + lists_len
+
+    lname = b"capa\x00"
+    layer = struct.pack(">III", W, H, 1) + struct.pack(">I", len(lname)) + lname
+    layer += (prop(6, struct.pack(">I", 255)) + prop(8, struct.pack(">I", 1))
+              + prop(15, struct.pack(">ii", 0, 0)) + prop(0, b""))
+    hier_off = layer_off + len(layer) + psz * 2
+    layer += ptr(hier_off) + ptr(0)
+    lvl_off = hier_off + 12 + psz * 2
+    hier = struct.pack(">III", W, H, 4) + ptr(lvl_off) + ptr(0)
+    tile_off = lvl_off + 8 + psz * 2
+    lvl = struct.pack(">II", W, H) + ptr(tile_off) + ptr(0)
+    write(name, head + ptr(layer_off) + ptr(0) + ptr(0) + layer + hier + lvl + tile)
+
+
 if __name__ == "__main__":
     os.makedirs(OUT, exist_ok=True)
     print("Generando muestras en %s" % OUT)
     gen_pnm(); gen_xpm(); gen_ilbm(); gen_macpaint(); gen_xwd()
     gen_dpx(); gen_icns(); gen_containers()
+    gen_acbm(); gen_sun_rle(); gen_pcx(); gen_atari(); gen_zx(); gen_koala()
+    gen_gem(); gen_tim(); gen_pix(); gen_dds(); gen_fits(); gen_dicom()
+    gen_tiff_rot(); gen_wmf()
+    gen_xcf(1, "v1.xcf"); gen_xcf(11, "v11.xcf")
     print("Listo.")

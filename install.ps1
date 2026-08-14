@@ -54,14 +54,33 @@ $exeName   = 'lux.exe'
 $src       = $PSScriptRoot
 $scopeFlag = if ($Machine) { '-Machine' } else { '-PerUser' }
 
-# Extensiones que Lux abre (misma lista que lux.iss / README).
-$exts = @('jpg','jpeg','jpe','jfif','png','apng','gif','bmp','dib','tif','tiff','ico','cur','ani',
-          'mpo','jps','dds','jxr','wdp','hdp','webp','heic','heif','avif','jxl','svg','svgz',
-          'qoi','exr','tga','targa','icb','vda','vst','tpic','hdr','rgbe','xyze','pic',
-          'ppm','pgm','pbm','pnm','pam','psd','pdd','pcx','pfm','ras','sun',
-          'sgi','rgb','bw','wbmp','xbm','xpm','xwd','ff','farbfeld',
-          'iff','ilbm','lbm','mac','pntg','dpx','cin','icns','ora','kra',
-          'dng','cr2','cr3','nef','arw','orf','rw2')
+# Extensiones que Lux abre (misma lista que lux.iss / README). Quedan afuera a
+# proposito las ambiguas (.gz, .img, .scr, .exe, .dll…): Lux igual las abre si se
+# las pasás, pero no tiene sentido ofrecerlas en "Abrir con".
+$exts = @(# WIC y códecs del sistema
+          'jpg','jpeg','jpe','jfif','jif','png','apng','gif','bmp','dib','tif','tiff',
+          'ico','cur','ani','mpo','jps','dds','jxr','wdp','hdp',
+          'webp','heic','heif','heics','heifs','avif','avifs','avci','jxl',
+          'jp2','j2k','jpf','jpx','jpm','jpc',
+          # stb
+          'tga','targa','icb','vda','vst','tpic','hdr','rgbe','xyze','pic',
+          'ppm','pgm','pbm','pnm','pam','psd','pdd','psb',
+          # decoders propios y vectoriales
+          'svg','svgz','qoi','exr','emf','wmf','emz','wmz',
+          # contenedores comprimidos
+          'ora','kra','krz','sketch','procreate','xcf',
+          # exóticos
+          'pcx','pfm','ff','farbfeld','ras','sun','sgi','rgb','rgba','bw',
+          'wbmp','xbm','xpm','xwd','iff','ilbm','lbm','acbm','mac','pntg','macp',
+          'dpx','cin','icns',
+          # retro
+          'pi1','pi2','pi3','pc1','pc2','pc3','neo','koa','kla','tim','pix','als','dcx','pcd',
+          # cientificas y texturas
+          'fits','fit','fts','dcm','dicom','vtf','ktx',
+          # RAW de camara
+          '3fr','ari','arw','bay','cap','cr2','cr3','crw','dcr','dcs','dng','drf','eip','erf',
+          'fff','gpr','iiq','k25','kdc','mdc','mef','mos','mrw','nef','nrw','orf','pef','ptx',
+          'pxn','raf','raw','rw2','rwl','rwz','sr2','srf','srw','x3f')
 
 $startMenu = Join-Path $startMenuDir "$AppName.lnk"
 $uninstKey = "$hive\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\$AppName"

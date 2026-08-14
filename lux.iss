@@ -5,7 +5,7 @@
 #define AppPub     "Agustin Yarrus"
 #define AppUrl     "https://github.com/agustinyarrus/lux"
 ; extensiones para registrar en "Abrir con"
-#define Exts       ".jpg;.jpeg;.jpe;.jfif;.png;.apng;.gif;.bmp;.dib;.tif;.tiff;.ico;.cur;.ani;.mpo;.jps;.dds;.jxr;.wdp;.hdp;.webp;.heic;.heif;.avif;.jxl;.svg;.svgz;.qoi;.exr;.tga;.targa;.icb;.vda;.vst;.tpic;.hdr;.rgbe;.xyze;.pic;.ppm;.pgm;.pbm;.pnm;.pam;.psd;.pdd;.pcx;.pfm;.ras;.sun;.sgi;.rgb;.bw;.wbmp;.xbm;.xpm;.xwd;.ff;.farbfeld;.iff;.ilbm;.lbm;.mac;.pntg;.dpx;.cin;.icns;.ora;.kra;.dng;.cr2;.cr3;.nef;.arw;.orf;.rw2"
+#define Exts       ".jpg;.jpeg;.jpe;.jfif;.jif;.png;.apng;.gif;.bmp;.dib;.tif;.tiff;.ico;.cur;.ani;.mpo;.jps;.dds;.jxr;.wdp;.hdp;.webp;.heic;.heif;.heics;.heifs;.avif;.avifs;.avci;.jxl;.jp2;.j2k;.jpf;.jpx;.jpm;.jpc;.tga;.targa;.icb;.vda;.vst;.tpic;.hdr;.rgbe;.xyze;.pic;.ppm;.pgm;.pbm;.pnm;.pam;.psd;.pdd;.psb;.svg;.svgz;.qoi;.exr;.emf;.wmf;.emz;.wmz;.ora;.kra;.krz;.sketch;.procreate;.xcf;.pcx;.pfm;.ff;.farbfeld;.ras;.sun;.sgi;.rgb;.rgba;.bw;.wbmp;.xbm;.xpm;.xwd;.iff;.ilbm;.lbm;.acbm;.mac;.pntg;.macp;.dpx;.cin;.icns;.pi1;.pi2;.pi3;.pc1;.pc2;.pc3;.neo;.koa;.kla;.tim;.pix;.als;.dcx;.pcd;.fits;.fit;.fts;.dcm;.dicom;.vtf;.ktx;.3fr;.ari;.arw;.bay;.cap;.cr2;.cr3;.crw;.dcr;.dcs;.dng;.drf;.eip;.erf;.fff;.gpr;.iiq;.k25;.kdc;.mdc;.mef;.mos;.mrw;.nef;.nrw;.orf;.pef;.ptx;.pxn;.raf;.raw;.rw2;.rwl;.rwz;.sr2;.srf;.srw;.x3f"
 
 [Setup]
 AppId={{7A3C1E80-9F2B-4D6A-8E15-2C4B6D8F0A11}
