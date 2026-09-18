@@ -10,7 +10,7 @@ Win32 puro + Direct2D + WIC. Sin frameworks, sin runtime, sin dependencias. Un s
 ![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011-0078D6?logo=windows&logoColor=white)
 ![Direct2D](https://img.shields.io/badge/render-Direct2D%20%2B%20WIC-7AA2F7)
 ![Formatos](https://img.shields.io/badge/formatos-171%20extensiones-7AA2F7)
-![Size](https://img.shields.io/badge/exe-~710%20KB-9ECE6A)
+![Size](https://img.shields.io/badge/exe-~730%20KB-9ECE6A)
 ![License](https://img.shields.io/badge/License-MIT-9ECE6A)
 
 [![Descargar](https://img.shields.io/badge/Descargar-Setup_%2B_Portable-7AA2F7?style=for-the-badge&logo=github&logoColor=white)](https://github.com/agustinyarrus/lux/releases/latest)
