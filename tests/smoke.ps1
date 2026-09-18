@@ -15,8 +15,13 @@ using System.Runtime.InteropServices;
 public struct R { public int L, T, Rr, B; }
 public class Win {
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out R r);
+  [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr ctx);
 }
 '@ -ErrorAction SilentlyContinue
+# PerMonitorV2: si no, GetWindowRect devuelve coordenadas virtualizadas (a 150 % una
+# ventana de 630 px "mide" 420) y los umbrales de abajo no significan nada.
+[void][Win]::SetProcessDpiAwarenessContext([IntPtr](-4))
 
 $tmp = Join-Path $root '_smoke'
 Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
@@ -106,7 +111,7 @@ try {
     $f = Split-Path $full -Leaf
     if (-not (Test-Path $path)) { Write-Host "  [SKIP] $f (no generado)"; continue }
     $p = Start-Process $exe -ArgumentList "`"$path`"" -PassThru
-    $w = 0; $h = 0
+    $w = 0; $h = 0; $dpi = 96
     for ($i = 0; $i -lt 40; $i++) {
       Start-Sleep -Milliseconds 100
       $p.Refresh()
@@ -115,6 +120,7 @@ try {
         $r = New-Object R
         if ([Win]::GetWindowRect($p.MainWindowHandle, [ref]$r)) {
           $w = $r.Rr - $r.L; $h = $r.B - $r.T
+          $d = [Win]::GetDpiForWindow($p.MainWindowHandle); if ($d -gt 0) { $dpi = $d }
           if ($i -ge 6) { break }   # dar tiempo a que aplique el sizing
         }
       }
@@ -129,11 +135,13 @@ try {
     #   imagen chica  -> exactamente el minimo
     #   imagen grande -> mas alta que el minimo
     #   want = 0      -> caso de forma: la ventana tiene que quedar mas alta que ancha
+    # El minimo es 420x280 LOGICOS: en pixeles depende del DPI del monitor (630x420 a 150 %).
     $want = $all[$full]
+    $minH = [int][math]::Round(280 * $dpi / 96)
     $okSize = (-not $died) -and $w -gt 0 -and -not ($w -eq 800 -and $h -eq 600)
-    if ($want -eq 0)        { $okSize = $okSize -and ($h -gt $w) }   # rotada por EXIF
-    elseif ($want -ge 500)  { $okSize = $okSize -and ($h -gt 300) }  # crecio con la imagen
-    else                    { $okSize = $okSize -and ($h -lt 400) }  # se quedo en el minimo
+    if ($want -eq 0)        { $okSize = $okSize -and ($h -gt $w) }        # rotada por EXIF
+    elseif ($want -ge 500)  { $okSize = $okSize -and ($h -gt $minH) }     # crecio con la imagen
+    else                    { $okSize = $okSize -and ($h -eq $minH) }     # se quedo en el minimo
     if ($okSize) { Write-Host ("  [OK]   {0,-16} ventana {1}x{2}  (imagen {3} px)" -f $f, $w, $h, $want) }
     else { $fail++; Write-Host ("  [FAIL] {0,-16} ventana {1}x{2} murio={3} (imagen {4} px)" -f $f, $w, $h, $died, $want) -ForegroundColor Red }
   }

@@ -19,6 +19,10 @@ try {
   $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
   if (-not (Test-Path $vswhere)) { throw "vswhere.exe no encontrado (instala Visual Studio)" }
   $vsPath = & $vswhere -latest -products * -property installationPath
+  if (-not $vsPath) {   # instancia "incompleta" (un update a medias): -latest la esconde, -all la muestra
+    $vsPath = & $vswhere -all -prerelease -latest -products * -property installationPath
+  }
+  if (-not $vsPath) { throw "vswhere no encontro ninguna instalacion de Visual Studio" }
   $vcvars = Join-Path $vsPath "VC\Auxiliary\Build\vcvars64.bat"
   if (-not (Test-Path $vcvars)) { throw "vcvars64.bat no encontrado en $vsPath" }
 

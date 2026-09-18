@@ -79,6 +79,8 @@ Y respeta la **orientación EXIF**: las fotos del celular salen derechas, no aco
 ## 🎛️ Características
 
 - **Ventana pegada a la imagen** o **tamaño libre**: un toggle en la barra de título (o la tecla `W`) elige si cada imagen ajusta la ventana a su tamaño, o si conservás el tuyo. La preferencia y el tamaño/posición se **recuerdan entre sesiones**.
+- **Texto nítido de verdad**: ClearType real sobre un target opaco, hinting GDI-clásico y el peso de Cascadia elegido por el **tamaño final en píxeles** (más cuerpo cuanto más chica la letra) — cada asta cae en una columna de píxeles, en cualquier DPI.
+- **Píxel-exacto al 100 %**: la imagen se ancla en píxel entero, así que a escala real no se remuestrea nada.
 - **Render Direct2D** con interpolación bicúbica de alta calidad al reducir y _nearest_ al hacer pixel-peeping (≥300 %).
 - **Zoom al cursor** con la rueda, paneo al arrastrar, doble clic para alternar ajuste ↔ 100 %.
 - **Fondo _ambient_**: una versión desenfocada de la imagen llena el escenario (efecto Gaussian de D2D).

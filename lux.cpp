@@ -152,6 +152,7 @@ struct State {
     bool  lDown = false;
     POINT downPt{};
     bool  moved = false;
+    bool  mouseTracked = false; // TrackMouseEvent pedido (para recibir WM_MOUSELEAVE)
 
     // cromo (auto-hide)
     float chrome = 1.f;      // 0..1 opacidad de barra + HUD
@@ -191,6 +192,13 @@ static State g;
 // ---------------------------------------------------------------------------
 static int   dp(int v)   { return MulDiv(v, (int)g.dpi, 96); }
 static float dpf(float v){ return v * (float)g.dpi / 96.f; }
+static float snapPx(float v) { return floorf(v + 0.5f); }   // al pixel entero mas cercano
+
+// Trazos nitidos: un trazo de ancho entero solo cae en pixeles enteros si su
+// centro esta en la mitad del pixel (ancho impar) o justo en el borde (ancho par).
+// Un trazo de 1,5 px centrado en y=19,5 se reparte en tres filas grises.
+static float strokePx()                    { return std::max(1.f, snapPx(dpf(1.f))); }
+static float snapStroke(float v, float sw) { return floorf(v) + (((int)sw & 1) ? 0.5f : 0.f); }
 
 static std::wstring lower(std::wstring s) {
     for (auto& c : s) c = (wchar_t)towlower(c);
@@ -251,14 +259,25 @@ static void loadConfig() {
     g.cfg.maximized = jsonBool(s, "maximized", false);
     long x = jsonInt(s, "winX", LONG_MIN), y = jsonInt(s, "winY", LONG_MIN);
     long w = jsonInt(s, "winW", 0),        h = jsonInt(s, "winH", 0);
-    if (w >= 200 && h >= 150 && x != LONG_MIN && y != LONG_MIN) {
+    // Solo vale si cae (aunque sea en parte) en un monitor conectado: una config
+    // guardada con la ventana minimizada (-32000,-32000) o en un monitor que ya
+    // no esta nos dejaria la ventana fuera de la pantalla, invisible.
+    RECT wr{ (LONG)x, (LONG)y, (LONG)(x + w), (LONG)(y + h) };
+    if (w >= 200 && h >= 150 && x != LONG_MIN && y != LONG_MIN &&
+        MonitorFromRect(&wr, MONITOR_DEFAULTTONULL) != nullptr) {
         g.cfg.winX = (int)x; g.cfg.winY = (int)y; g.cfg.winW = (int)w; g.cfg.winH = (int)h;
         g.cfg.hasWin = true;
     }
 }
 static void saveConfig() {
     // capturar geometria actual si la ventana esta en estado normal (no maximizada/fullscreen)
-    if (g.hwnd && !g.fullscreen) {
+    if (g.hwnd && !g.fullscreen && IsIconic(g.hwnd)) {
+        // minimizada: GetWindowRect devuelve (-32000,-32000) y la proxima vez la
+        // ventana naceria fuera de la pantalla. Conservar la ultima geometria buena
+        // y recordar solo si al restaurar volveria maximizada.
+        WINDOWPLACEMENT wp{ sizeof(wp) };
+        if (GetWindowPlacement(g.hwnd, &wp)) g.cfg.maximized = (wp.flags & WPF_RESTORETOMAXIMIZED) != 0;
+    } else if (g.hwnd && !g.fullscreen) {
         g.cfg.maximized = IsZoomed(g.hwnd) != 0;
         if (!g.cfg.maximized) {
             RECT r;
@@ -1099,6 +1118,9 @@ static void clampPan() {
     // eje Y
     if (ih <= sh) g.oy = s.top + (sh - ih) * 0.5f;
     else          g.oy = std::min(s.top, std::max(s.top + sh - ih, g.oy));
+    // origen en pixel entero: centrar con medio pixel de resto remuestrea TODA la
+    // imagen (al 100 % cada pixel quedaria repartido entre dos y se veria blanda)
+    g.ox = snapPx(g.ox); g.oy = snapPx(g.oy);
 }
 static void fitToWindow() {
     g.scale = fitScale();
@@ -1153,12 +1175,12 @@ static void applyWindowSizing(bool recenter) {
 
     int  workW = mi.rcWork.right - mi.rcWork.left;
     int  workH = mi.rcWork.bottom - mi.rcWork.top;
-    int  tbh = dp(TBH_L);
+    int  tbh = dp(TBH_L), sbh = dp(SBH_L);   // el escenario = ventana - barra de titulo - barra de estado
     double availW = workW - dpf(60.f);
-    double availH = workH - dpf(60.f) - tbh;
+    double availH = workH - dpf(60.f) - tbh - sbh;
     double s = std::min(1.0, std::min(availW / g.imgW, availH / g.imgH));
     int winW = std::max(dp(420), (int)lround(g.imgW * s));
-    int winH = std::max(dp(280), (int)lround(g.imgH * s) + tbh);
+    int winH = std::max(dp(280), (int)lround(g.imgH * s) + tbh + sbh);
 
     int cx, cy;
     if (recenter) {
@@ -1175,19 +1197,69 @@ static void applyWindowSizing(bool recenter) {
 }
 
 // ---------------------------------------------------------------------------
+//  Tipografia nitida
+//
+//  Tres cosas hacen que el texto chico de Cascadia se vea gris y borroso, y las
+//  tres se resuelven aca:
+//   1. El peso se elige por el TAMAÑO FINAL en pixeles, no por el rol. Las caras
+//      finas (ExtraLight/Light) son hermosas grandes y se deshacen chicas: por
+//      debajo de cierto tamaño el trazo mide menos de un pixel y el antialiasing
+//      lo pinta gris sucio. Cuanto mas chica la letra, mas cuerpo. Los textos de
+//      datos (numeros, medidas) llevan un escalon extra: la jerarquia la dan
+//      tamaño + color + peso, no solo el tamaño.
+//   2. Medicion y render GDI-compatibles (hinting completo, avances enteros): es
+//      el ClearType "clasico", cada asta cae en una columna de pixeles.
+//   3. ClearType de verdad, que exige un render target OPACO (ver
+//      createDeviceResources) y origenes de texto en pixel entero (drawTextIn).
+//  Umbrales calibrados a 150 %: 20/15/12 px = 10/7,5/6 pt logicos.
+// ---------------------------------------------------------------------------
+static const float TEXT_MIN_PX = 10.f;   // piso absoluto del tamaño final (5 pt a 150 %)
+
+static DWRITE_FONT_WEIGHT weightForPx(float px, int masCuerpo) {
+    static const DWRITE_FONT_WEIGHT escalera[] = {   // de la mas fina a la mas solida
+        DWRITE_FONT_WEIGHT_EXTRA_LIGHT, DWRITE_FONT_WEIGHT_LIGHT,
+        DWRITE_FONT_WEIGHT_SEMI_LIGHT,  DWRITE_FONT_WEIGHT_NORMAL,
+    };
+    int e = px >= 20.f ? 0 : px >= 15.f ? 1 : px >= 12.f ? 2 : 3;
+    e = std::min(3, e + masCuerpo);
+    return escalera[e];
+}
+
+// Antialiasing de texto segun lo que tenga configurado el sistema (ClearType,
+// gris o nada) y parametros de render (gamma, contraste, geometria RGB/BGR) del
+// monitor donde esta la ventana. Se vuelve a llamar si cambia el DPI, el monitor
+// o la configuracion de fuentes.
+static void applyTextRendering() {
+    if (!g.rt || !g.dw) return;
+    BOOL smooth = TRUE; UINT type = FE_FONTSMOOTHINGCLEARTYPE;
+    SystemParametersInfoW(SPI_GETFONTSMOOTHING, 0, &smooth, 0);
+    SystemParametersInfoW(SPI_GETFONTSMOOTHINGTYPE, 0, &type, 0);
+    g.rt->SetTextAntialiasMode(!smooth ? D2D1_TEXT_ANTIALIAS_MODE_ALIASED
+        : type == FE_FONTSMOOTHINGCLEARTYPE ? D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE
+                                            : D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+    ComPtr<IDWriteRenderingParams> rp;
+    HMONITOR mon = MonitorFromWindow(g.hwnd, MONITOR_DEFAULTTONEAREST);
+    if (SUCCEEDED(g.dw->CreateMonitorRenderingParams(mon, &rp)) && rp) g.rt->SetTextRenderingParams(rp.Get());
+}
+
+// ---------------------------------------------------------------------------
 //  Recursos Direct2D
 // ---------------------------------------------------------------------------
 static void createTextFormats() {
-    auto mk = [&](float px, DWRITE_FONT_WEIGHT w, IDWriteTextFormat** out) {
-        g.dw->CreateTextFormat(L"Cascadia Code", nullptr, w, DWRITE_FONT_STYLE_NORMAL,
-            DWRITE_FONT_STRETCH_NORMAL, px, L"", out);
+    // dip = tamaño de diseño a 96 dpi; el final (px fisicos, porque el target corre a
+    // 96 dpi y escalamos a mano) se redondea a entero: el hinting de la fuente esta
+    // afinado por ppem entero. masCuerpo = escalon extra para los textos de datos.
+    auto mk = [&](float dip, int masCuerpo, IDWriteTextFormat** out) {
+        float px = snapPx(std::max(TEXT_MIN_PX, dpf(dip)));
+        g.dw->CreateTextFormat(L"Cascadia Code", nullptr, weightForPx(px, masCuerpo),
+            DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, px, L"", out);
     };
     g.tfCap.Reset(); g.tfHud.Reset(); g.tfTitle.Reset(); g.tfHint.Reset(); g.tfStatus.Reset();
-    mk(dpf(10.0f), DWRITE_FONT_WEIGHT_LIGHT, &g.tfCap);
-    mk(dpf(11.5f), DWRITE_FONT_WEIGHT_LIGHT, &g.tfHud);
-    mk(dpf(13.5f), DWRITE_FONT_WEIGHT_LIGHT, &g.tfTitle);
-    mk(dpf(11.0f), DWRITE_FONT_WEIGHT_LIGHT, &g.tfHint);
-    mk(dpf(10.0f), DWRITE_FONT_WEIGHT_LIGHT, &g.tfStatus);
+    mk(10.0f, 0, &g.tfCap);     // caption: nombre + contador
+    mk(11.5f, 1, &g.tfHud);     // HUD: dimensiones y zoom (datos)
+    mk(13.5f, 0, &g.tfTitle);   // "Lux" / "No se pudo abrir"
+    mk(11.0f, 0, &g.tfHint);    // ayuda / detalle del error
+    mk(10.0f, 1, &g.tfStatus);  // barra de estado (datos)
     if (g.tfCap)  {
         g.tfCap->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
         g.tfCap->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
@@ -1216,7 +1288,9 @@ static bool createDeviceResources() {
     D2D1_SIZE_U size = D2D1::SizeU(std::max<LONG>(rc.right, 1), std::max<LONG>(rc.bottom, 1));
 
     D2D1_RENDER_TARGET_PROPERTIES rtp = D2D1::RenderTargetProperties();
-    rtp.pixelFormat = D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED);
+    // OPACO (IGNORE): la ventana no es translucida y ClearType solo existe sobre un
+    // target sin alfa; con PREMULTIPLIED Direct2D cae a antialiasing gris.
+    rtp.pixelFormat = D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE);
     D2D1_HWND_RENDER_TARGET_PROPERTIES hp = D2D1::HwndRenderTargetProperties(g.hwnd, size,
         D2D1_PRESENT_OPTIONS_NONE);
 
@@ -1231,6 +1305,7 @@ static bool createDeviceResources() {
     }
     g.rt->CreateSolidColorBrush(col::fg, &g.brush);
     createTextFormats();
+    applyTextRendering();
 
     // Si ya habia imagen, recrear su bitmap en el nuevo target
     if (!g.imgPath.empty()) {
@@ -1288,16 +1363,18 @@ static void drawWindowButtons() {
             setBrush(hc, a);
             g.rt->FillRectangle(r, g.brush.Get());
         }
-        float cx = (r.left + r.right) * 0.5f, cy = h * 0.5f;
-        float s = dpf(3.7f), sw = dpf(1.0f);
+        // trazo de ancho entero y centro clavado al pixel: lineas y marcos nitidos
+        float sw = strokePx();
+        float cx = snapStroke((r.left + r.right) * 0.5f, sw), cy = snapStroke(h * 0.5f, sw);
+        float s = snapPx(dpf(3.7f));
         if (i == 3) {            // toggle "ventana pegada a la imagen": marco con imagen adentro
             bool on = g.cfg.fitWindow;
             D2D1_COLOR_F tc = on ? col::accent : (hot ? col::fg : col::fgDim);
-            float bw = dpf(5.0f), bh = dpf(3.9f);
+            float bw = snapPx(dpf(5.0f)), bh = snapPx(dpf(3.9f));
             D2D1_RECT_F frame = D2D1::RectF(cx - bw, cy - bh, cx + bw, cy + bh);
             setBrush(tc, a);
             g.rt->DrawRectangle(frame, g.brush.Get(), sw);
-            float pad = dpf(1.8f);
+            float pad = snapPx(dpf(1.8f)) + (((int)sw & 1) ? 0.5f : 0.f);   // relleno con bordes en pixel entero
             setBrush(tc, on ? a * 0.85f : a * 0.28f);
             g.rt->FillRectangle(D2D1::RectF(frame.left+pad, frame.top+pad, frame.right-pad, frame.bottom-pad), g.brush.Get());
             continue;
@@ -1308,8 +1385,9 @@ static void drawWindowButtons() {
             g.rt->DrawLine(D2D1::Point2F(cx - s, cy), D2D1::Point2F(cx + s, cy), g.brush.Get(), sw);
         } else if (i == 1) {     // maximizar/restaurar: cuadrado(s)
             if (g.fullscreen || IsZoomed(g.hwnd)) {
-                D2D1_RECT_F a1 = D2D1::RectF(cx - s + dpf(2), cy - s, cx + s, cy + s - dpf(2));
-                D2D1_RECT_F a2 = D2D1::RectF(cx - s, cy - s + dpf(2), cx + s - dpf(2), cy + s);
+                float o = snapPx(dpf(2));
+                D2D1_RECT_F a1 = D2D1::RectF(cx - s + o, cy - s, cx + s, cy + s - o);
+                D2D1_RECT_F a2 = D2D1::RectF(cx - s, cy - s + o, cx + s - o, cy + s);
                 g.rt->DrawRectangle(a1, g.brush.Get(), sw);
                 g.rt->DrawRectangle(a2, g.brush.Get(), sw);
             } else {
@@ -1322,16 +1400,42 @@ static void drawWindowButtons() {
     }
 }
 
+// Layout GDI-compatible: metricas y avances redondeados a pixel entero, y al
+// dibujarlo Direct2D usa el modo de render GDI_CLASSIC (hinting completo, sin
+// posicionamiento subpixel). Es lo que separa un texto chico nitido de uno gris.
+// Se mide y se dibuja con el MISMO layout para que nunca difieran.
+static ComPtr<IDWriteTextLayout> makeLayout(IDWriteTextFormat* fmt, const std::wstring& s, float maxW, float maxH) {
+    ComPtr<IDWriteTextLayout> tl;
+    if (!g.dw || !fmt) return tl;
+    g.dw->CreateGdiCompatibleTextLayout(s.c_str(), (UINT32)s.size(), fmt, maxW, maxH,
+                                        1.f /*px por dip: el target corre a 96 dpi*/, nullptr, FALSE, &tl);
+    return tl;
+}
 // Mide el ancho (px) de un texto con un formato dado.
 static float measureW(IDWriteTextFormat* fmt, const std::wstring& s) {
-    if (s.empty() || !g.dw || !fmt) return 0.f;
-    ComPtr<IDWriteTextLayout> tl;
-    if (FAILED(g.dw->CreateTextLayout(s.c_str(), (UINT32)s.size(), fmt, 100000.f, 100.f, &tl)))
-        return 0.f;
+    if (s.empty()) return 0.f;
+    ComPtr<IDWriteTextLayout> tl = makeLayout(fmt, s, 100000.f, 100.f);
+    if (!tl) return 0.f;
     DWRITE_TEXT_METRICS m{}; tl->GetMetrics(&m);
     return m.widthIncludingTrailingWhitespace;
 }
 static float measureCapW(const std::wstring& s) { return measureW(g.tfCap.Get(), s); }
+
+// Dibuja `s` dentro de `r` con la alineacion del formato, corriendo el origen para
+// que la primera linea arranque en un pixel entero (x e y). Un origen fraccional
+// desplaza todos los glifos medio pixel y los vuelve borrosos aunque el hinting
+// sea perfecto; con la alineacion centrada eso pasa una de cada dos veces.
+static void drawTextIn(const std::wstring& s, IDWriteTextFormat* fmt, const D2D1_RECT_F& r,
+                       D2D1_DRAW_TEXT_OPTIONS opts = D2D1_DRAW_TEXT_OPTIONS_NONE) {
+    if (s.empty() || !fmt || !g.rt) return;
+    float w = std::max(1.f, snapPx(r.right - r.left)), h = std::max(1.f, snapPx(r.bottom - r.top));
+    ComPtr<IDWriteTextLayout> tl = makeLayout(fmt, s, w, h);
+    if (!tl) return;
+    DWRITE_TEXT_METRICS m{}; tl->GetMetrics(&m);
+    float x = snapPx(r.left + m.left) - m.left;
+    float y = snapPx(r.top  + m.top)  - m.top;
+    g.rt->DrawTextLayout(D2D1::Point2F(x, y), tl.Get(), g.brush.Get(), opts);
+}
 
 // Peso de archivo humanizado (B / KB / MB / GB).
 static std::wstring humanSize(UINT64 b) {
@@ -1409,9 +1513,7 @@ static void drawTitleBar() {
             g.capText = buildCaption(rc.right);
         }
         setBrush(col::fgDim, a);
-        D2D1_RECT_F tr = D2D1::RectF(0, 0, (float)rc.right, h);
-        g.rt->DrawTextW(g.capText.c_str(), (UINT32)g.capText.size(), g.tfCap.Get(), tr, g.brush.Get(),
-            D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        drawTextIn(g.capText, g.tfCap.Get(), D2D1::RectF(0, 0, (float)rc.right, h), D2D1_DRAW_TEXT_OPTIONS_CLIP);
     }
     drawWindowButtons();
 }
@@ -1434,17 +1536,16 @@ static void drawHud() {
     swprintf(buf, 128, L"%u × %u    ·    %d%%", g.imgW, g.imgH, zoomPct);
     std::wstring s = buf;
 
-    // medir
-    ComPtr<IDWriteTextLayout> tl;
-    g.dw->CreateTextLayout(s.c_str(), (UINT32)s.size(), g.tfHud.Get(), 1000.f, 100.f, &tl);
-    DWRITE_TEXT_METRICS m{}; if (tl) tl->GetMetrics(&m);
-    float padX = dpf(14), padY = dpf(6);
-    float w = (tl ? m.widthIncludingTrailingWhitespace : dpf(120)) + padX * 2;
-    float hh = dpf(24);
+    // medir (mismo layout GDI-compatible con el que se dibuja)
+    float tw = measureW(g.tfHud.Get(), s);
+    float padX = dpf(14);
+    float w = snapPx((tw > 0.f ? tw : dpf(120)) + padX * 2);
+    float hh = snapPx(dpf(24));
     RECT rc; GetClientRect(g.hwnd, &rc);
     float cx = rc.right * 0.5f;
-    float y2 = rc.bottom - (float)dp(SBH_L) - dpf(14);   // por encima de la barra de estado
-    D2D1_RECT_F pill = D2D1::RectF(cx - w*0.5f, y2 - hh, cx + w*0.5f, y2);
+    float y2 = snapPx(rc.bottom - (float)dp(SBH_L) - dpf(14));   // por encima de la barra de estado
+    float px0 = snapPx(cx - w * 0.5f);
+    D2D1_RECT_F pill = D2D1::RectF(px0, y2 - hh, px0 + w, y2);
     D2D1_ROUNDED_RECT rr = D2D1::RoundedRect(pill, hh*0.5f, hh*0.5f);
 
     setBrush(D2D1::ColorF(0x0B0E14), 0.72f * a);
@@ -1453,8 +1554,7 @@ static void drawHud() {
     g.rt->DrawRoundedRectangle(rr, g.brush.Get(), dpf(1));
 
     setBrush(col::fgDim, a);
-    D2D1_RECT_F tr = D2D1::RectF(pill.left, pill.top, pill.right, pill.bottom);
-    g.rt->DrawTextW(s.c_str(), (UINT32)s.size(), g.tfHud.Get(), tr, g.brush.Get());
+    drawTextIn(s, g.tfHud.Get(), pill);
 }
 
 // Barra de estado inferior: detalles de la imagen. Fina como la de titulo y con
@@ -1471,8 +1571,8 @@ static void drawStatusBar() {
     setBrush(col::bg, 1.f);
     g.rt->FillRectangle(D2D1::RectF(0, top, (float)rc.right, (float)rc.bottom), g.brush.Get());
     setBrush(D2D1::ColorF(1, 1, 1, 1), 0.05f * a);
-    g.rt->DrawLine(D2D1::Point2F(0, top + dpf(0.5f)),
-                   D2D1::Point2F((float)rc.right, top + dpf(0.5f)), g.brush.Get(), dpf(1));
+    g.rt->DrawLine(D2D1::Point2F(0, top + 0.5f),               // hairline de 1 px exacto
+                   D2D1::Point2F((float)rc.right, top + 0.5f), g.brush.Get(), 1.f);
     if (a <= 0.01f) return;
 
     float padX = dpf(14.f);
@@ -1483,8 +1583,7 @@ static void drawStatusBar() {
     float zw = measureW(g.tfStatus.Get(), zoom);
     setBrush(col::fgFaint, a);
     D2D1_RECT_F zr = D2D1::RectF((float)rc.right - padX - zw, top, (float)rc.right - padX, (float)rc.bottom);
-    g.rt->DrawTextW(zoom.c_str(), (UINT32)zoom.size(), g.tfStatus.Get(), zr, g.brush.Get(),
-                    D2D1_DRAW_TEXT_OPTIONS_CLIP);
+    drawTextIn(zoom, g.tfStatus.Get(), zr, D2D1_DRAW_TEXT_OPTIONS_CLIP);
 
     // izquierda: cadena de datos de la imagen, unidos por " · " (los vacios se omiten)
     const std::wstring sep = L"   ·   ";
@@ -1511,8 +1610,7 @@ static void drawStatusBar() {
 
     setBrush(col::fgDim, a);
     D2D1_RECT_F lr = D2D1::RectF(padX, top, (float)rc.right - padX - zw - dpf(18.f), (float)rc.bottom);
-    g.rt->DrawTextW(left.c_str(), (UINT32)left.size(), g.tfStatus.Get(), lr, g.brush.Get(),
-                    D2D1_DRAW_TEXT_OPTIONS_CLIP);
+    drawTextIn(left, g.tfStatus.Get(), lr, D2D1_DRAW_TEXT_OPTIONS_CLIP);
 }
 
 // logo "lux": un destello/sol minimalista (distinto del iris de Lumen)
@@ -1543,14 +1641,13 @@ static void drawEmpty() {
     if (g.tfTitle) {
         setBrush(err ? col::danger : col::fgDim, err ? 0.9f : 1.f);
         D2D1_RECT_F tr = D2D1::RectF(0, cy + dpf(16), (float)rc.right, cy + dpf(40));
-        const wchar_t* t = err ? L"No se pudo abrir" : L"Lux";
-        g.rt->DrawTextW(t, (UINT32)wcslen(t), g.tfTitle.Get(), tr, g.brush.Get());
+        drawTextIn(err ? L"No se pudo abrir" : L"Lux", g.tfTitle.Get(), tr);
     }
     if (g.tfHint) {
         setBrush(col::fgFaint, 1.f);
         D2D1_RECT_F tr = D2D1::RectF(dpf(20), cy + dpf(44), (float)rc.right - dpf(20), cy + dpf(112));
         std::wstring t = err ? g.loadError : std::wstring(L"Ctrl+O para abrir   ·   o arrastrá una imagen");
-        g.rt->DrawTextW(t.c_str(), (UINT32)t.size(), g.tfHint.Get(), tr, g.brush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        drawTextIn(t, g.tfHint.Get(), tr, D2D1_DRAW_TEXT_OPTIONS_CLIP);
     }
 }
 
@@ -1645,7 +1742,7 @@ static void setFullscreen(bool on) {
     if (on) {
         GetWindowPlacement(g.hwnd, &g.prevPlace);
         MONITORINFO mi{ sizeof(mi) };
-        GetMonitorInfo(MonitorFromWindow(g.hwnd, MONITOR_DEFAULTTOPRIMARY), &mi);
+        GetMonitorInfo(MonitorFromWindow(g.hwnd, MONITOR_DEFAULTTONEAREST), &mi);   // el monitor de la ventana, no el primario
         SetWindowLongPtrW(g.hwnd, GWL_STYLE, style & ~WS_OVERLAPPEDWINDOW);
         SetWindowPos(g.hwnd, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
             mi.rcMonitor.right - mi.rcMonitor.left, mi.rcMonitor.bottom - mi.rcMonitor.top,
@@ -1767,9 +1864,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (wp == TRUE) {
             NCCALCSIZE_PARAMS* p = (NCCALCSIZE_PARAMS*)lp;
             RECT* rc = &p->rgrc[0];
-            if (IsZoomed(hwnd)) {
-                int fx = GetSystemMetrics(SM_CXFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER);
-                int fy = GetSystemMetrics(SM_CYFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER);
+            if (IsZoomed(hwnd)) {   // metricas del DPI de ESTA ventana (en otro monitor difieren)
+                int fx = GetSystemMetricsForDpi(SM_CXFRAME, g.dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, g.dpi);
+                int fy = GetSystemMetricsForDpi(SM_CYFRAME, g.dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, g.dpi);
                 rc->left += fx; rc->right -= fx; rc->top += fy; rc->bottom -= fy;
             }
             // si no esta maximizada: client = toda la ventana (sin barra del sistema)
@@ -1820,10 +1917,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         SetWindowPos(hwnd, nullptr, nr->left, nr->top, nr->right - nr->left, nr->bottom - nr->top,
             SWP_NOZORDER | SWP_NOACTIVATE);
         if (g.dw) createTextFormats();
+        applyTextRendering();
         if (g.fit) fitToWindow();
         invalidate();
         return 0;
     }
+    case WM_EXITSIZEMOVE:   // pudo cambiar de monitor (misma DPI, otra geometria de subpixel)
+    case WM_DISPLAYCHANGE:
+    case WM_SETTINGCHANGE:  // ClearType prendido/apagado, ajustes del afinador
+        applyTextRendering();
+        invalidate();
+        break;
     case WM_SIZE: {
         if (g.rt) {
             RECT rc; GetClientRect(hwnd, &rc);
@@ -1844,6 +1948,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_MOUSEMOVE: {
         int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
         onMouseActivity();
+        if (!g.mouseTracked) {   // avisar cuando el mouse salga del area cliente (una vez por entrada)
+            TRACKMOUSEEVENT tme{ sizeof(tme), TME_LEAVE, hwnd, 0 };
+            g.mouseTracked = TrackMouseEvent(&tme) != FALSE;
+        }
         int hb = hitButton(x, y);
         if (hb != g.hoverBtn) { g.hoverBtn = hb; invalidate(); }
         int he = hitEdge(x, y);
@@ -1856,6 +1964,18 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (g.lDown && (abs(x - g.downPt.x) > 3 || abs(y - g.downPt.y) > 3)) g.moved = true;
         return 0;
     }
+    case WM_MOUSELEAVE: {
+        // el mouse salio de la ventana (o paso a la barra, que es area no-cliente):
+        // sin esto un boton o un chevron quedaban resaltados hasta la proxima entrada
+        g.mouseTracked = false;
+        if (g.hoverBtn != -1 || g.hoverEdge != 0) { g.hoverBtn = -1; g.hoverEdge = 0; invalidate(); }
+        return 0;
+    }
+    case WM_NCMOUSEMOVE:
+        // sobre la barra de titulo (HTCAPTION) no llega WM_MOUSEMOVE: cuenta igual
+        // como actividad, si no el cromo se desvanecia con el mouse apoyado ahi
+        onMouseActivity();
+        break;
     case WM_SETCURSOR: {
         if (LOWORD(lp) == HTCLIENT) {
             if (g.cursorHidden) { SetCursor(nullptr); return TRUE; }
@@ -1903,8 +2023,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_LBUTTONDBLCLK: {
         int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
-        if (y < dp(TBH_L) && !g.fullscreen) { // doble clic en barra = max/restore
-            ShowWindow(hwnd, IsZoomed(hwnd) ? SW_RESTORE : SW_MAXIMIZE);
+        if (y < dp(TBH_L) && !g.fullscreen) {
+            // La barra devuelve HTCAPTION, asi que su doble clic (max/restore) lo
+            // resuelve DefWindowProc en WM_NCLBUTTONDBLCLK. Aca solo llega el doble
+            // clic sobre un BOTON: el primer clic ya actuo, que el UP de este no repita.
+            g.moved = true;
             return 0;
         }
         if (g.bmp && hitEdge(x,y)==0) toggleFitDetail((float)x, (float)y);
