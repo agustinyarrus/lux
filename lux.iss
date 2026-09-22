@@ -1,6 +1,6 @@
 ; Lux — instalador (Inno Setup 6). Compilar: ISCC lux.iss  ->  dist\Lux-Setup-x.y.z.exe
 #define AppName    "Lux"
-#define AppVer     "1.0.1"
+#define AppVer     "1.1.0"
 #define AppExe     "lux.exe"
 #define AppPub     "Agustin Yarrus"
 #define AppUrl     "https://github.com/agustinyarrus/lux"

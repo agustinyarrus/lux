@@ -8,6 +8,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <math.h>
+#include "tonemap.h"   // HDR -> 8 bits (PFM)
 
 static uint32_t ex_be32(const unsigned char* p){ return ((uint32_t)p[0]<<24)|((uint32_t)p[1]<<16)|((uint32_t)p[2]<<8)|p[3]; }
 static uint32_t ex_le32(const unsigned char* p){ return ((uint32_t)p[3]<<24)|((uint32_t)p[2]<<16)|((uint32_t)p[1]<<8)|p[0]; }
@@ -26,13 +27,6 @@ static int      ex_hex1(unsigned char c){
 typedef unsigned char* (*ex_embedded_fn)(const unsigned char* data, size_t n, int* w, int* h);
 static ex_embedded_fn ex_decode_embedded = NULL;
 
-// tone-map HDR float -> 8 bit (normaliza por el max si supera 1, luego gamma 2.2)
-static unsigned char ex_tm(float v, float scale){
-    v *= scale; if(v<0) v=0;
-    v = powf(v, 1.0f/2.2f);
-    int i = (int)(v*255.0f + 0.5f);
-    return (unsigned char)(i<0?0:(i>255?255:i));
-}
 
 // ---------------------------------------------------------------- Farbfeld
 static unsigned char* ex_farbfeld(const unsigned char* d, size_t n, int* w, int* h){
@@ -112,17 +106,19 @@ static unsigned char* ex_pcx(const unsigned char* d, size_t n, int* w, int* h){
 }
 
 // ---------------------------------------------------------------- PFM (float, HDR)
-static unsigned char* ex_pfm(const unsigned char* d, size_t n, int* w, int* h){
+// Cabecera "PF" (color) o "Pf" (gris), ancho, alto y escala (negativa = little endian); los datos
+// van de ABAJO hacia arriba. ex_pfm_float devuelve el float lineal (malloc, *channels = 1 o 3)
+// para que el host lo pase por el tone mapping; ex_pfm lo entrega ya en 8 bits.
+static float* ex_pfm_float(const unsigned char* d, size_t n, int* w, int* h, int* channels){
     if(n<3 || d[0]!='P' || (d[1]!='F'&&d[1]!='f')) return NULL;
     int color=(d[1]=='F'); size_t i=2;
-    long vals[3]={0,0,0}; double sc=0; int got=0; // W, H, scale
+    long vals[2]={0,0}; double sc=0;
     char num[64];
     for(int t=0;t<3;t++){
         while(i<n && (d[i]==' '||d[i]=='\n'||d[i]=='\r'||d[i]=='\t')) i++;
         int k=0; while(i<n && k<63 && !(d[i]==' '||d[i]=='\n'||d[i]=='\r'||d[i]=='\t')) num[k++]=(char)d[i++];
         num[k]=0; if(!k) return NULL;
         if(t<2) vals[t]=atol(num); else sc=atof(num);
-        got++;
     }
     i++; // un whitespace tras el scale
     int W=(int)vals[0], H=(int)vals[1];
@@ -130,25 +126,24 @@ static unsigned char* ex_pfm(const unsigned char* d, size_t n, int* w, int* h){
     int ch=color?3:1; int little=(sc<0); size_t need=(size_t)W*H*ch*4;
     if(i+need>n) return NULL;
     const unsigned char* p=d+i;
-    // 1ª pasada: max para normalizar
-    float mx=0; size_t cnt=(size_t)W*H*ch;
-    for(size_t j=0;j<cnt;j++){ const unsigned char* q=p+j*4; unsigned char b[4];
-        if(little){b[0]=q[0];b[1]=q[1];b[2]=q[2];b[3]=q[3];} else {b[0]=q[3];b[1]=q[2];b[2]=q[1];b[3]=q[0];}
-        float f; memcpy(&f,b,4); if(f>mx && f<1e30f) mx=f; }
-    float scale=(mx>1.0f)?1.0f/mx:1.0f;
-    unsigned char* out=(unsigned char*)malloc((size_t)W*H*4); if(!out) return NULL;
-    for(int y=0;y<H;y++){ int sy=H-1-y; // PFM va de abajo hacia arriba
-        for(int x=0;x<W;x++){ const unsigned char* q=p+((size_t)sy*W+x)*ch*4; float c[3];
-            for(int z=0;z<ch;z++){ unsigned char b[4]; const unsigned char* qq=q+z*4;
-                if(little){b[0]=qq[0];b[1]=qq[1];b[2]=qq[2];b[3]=qq[3];} else {b[0]=qq[3];b[1]=qq[2];b[2]=qq[1];b[3]=qq[0];}
-                memcpy(&c[z],b,4); }
-            unsigned char* o=out+((size_t)y*W+x)*4;
-            if(color){ o[0]=ex_tm(c[0],scale); o[1]=ex_tm(c[1],scale); o[2]=ex_tm(c[2],scale); }
-            else { unsigned char g=ex_tm(c[0],scale); o[0]=o[1]=o[2]=g; }
-            o[3]=255;
-        }
+    float* out=(float*)malloc(need); if(!out) return NULL;
+    for(int y=0;y<H;y++){ int sy=H-1-y;
+        const unsigned char* row=p+(size_t)sy*W*ch*4;
+        float* o=out+(size_t)y*W*ch;
+        for(size_t j=0;j<(size_t)W*ch;j++){ const unsigned char* q=row+j*4; unsigned char b[4];
+            if(little){b[0]=q[0];b[1]=q[1];b[2]=q[2];b[3]=q[3];} else {b[0]=q[3];b[1]=q[2];b[2]=q[1];b[3]=q[0];}
+            memcpy(&o[j],b,4); }
     }
-    *w=W; *h=H; return out;
+    *w=W; *h=H; *channels=ch; return out;
+}
+
+static unsigned char* ex_pfm(const unsigned char* d, size_t n, int* w, int* h){
+    int ch=0; float* f=ex_pfm_float(d,n,w,h,&ch);
+    if(!f) return NULL;
+    unsigned char* out=(unsigned char*)malloc((size_t)(*w)*(*h)*4);
+    if(out) tm_to_rgba8(f,ch,*w,*h,out);
+    free(f);
+    return out;
 }
 
 // ---------------------------------------------------------------- Sun Raster (.ras)

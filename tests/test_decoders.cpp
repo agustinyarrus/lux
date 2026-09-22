@@ -434,6 +434,95 @@ static void testXcf() {
     }
 }
 
+// ------------------------------------------------------------------- tone mapping HDR
+// La escena que motivo el cambio: un interior en penumbra (luminancia ~0,2) con dos lamparas
+// de 400. Normalizar por el maximo la dejaba negra; el tone mapping tiene que dejar el interior
+// en medios tonos y las lamparas quemadas (blancas).
+static void testToneMap() {
+    g_case = "tonemap";
+    // 1) rango normal: solo la curva sRGB exacta, sin exposicion
+    {
+        float px[] = { 0.f, 0.5f, 1.f };
+        unsigned char out[12];
+        int hdr = tm_to_rgba8(px, 1, 3, 1, out);
+        ok(hdr == 0, "una imagen en [0,1] no deberia comprimirse");
+        ok(out[0] == 0 && out[4] == 188 && out[8] == 255, "sRGB 0/0.5/1 = %d/%d/%d, esperaba 0/188/255", out[0], out[4], out[8]);
+        ok(out[3] == 255, "sin canal alfa el pixel es opaco");
+    }
+    // 2) HDR de verdad
+    {
+        const int W = 64, H = 64;
+        std::vector<float> px((size_t)W * H * 3);
+        for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) {
+            float* p = &px[((size_t)y * W + x) * 3];
+            p[0] = 0.15f + 0.1f * x / W; p[1] = 0.2f; p[2] = 0.12f;
+        }
+        for (int k = 0; k < 6; k++) { float* p = &px[((size_t)(10 + k) * W + 20) * 3]; p[0] = p[1] = p[2] = 400.f; }
+        std::vector<unsigned char> out((size_t)W * H * 4);
+        int hdr = tm_to_rgba8(px.data(), 3, W, H, out.data());
+        ok(hdr == 1, "con luces de 400 tiene que comprimir rango");
+        const unsigned char* mid = &out[((size_t)40 * W + 40) * 4];
+        ok(mid[1] > 60 && mid[1] < 230, "el interior quedo en %d: tendria que caer en medios tonos", mid[1]);
+        const unsigned char* lamp = &out[((size_t)10 * W + 20) * 4];
+        ok(lamp[0] >= 250 && lamp[1] >= 250 && lamp[2] >= 250, "la lampara quedo en %d,%d,%d: tendria que quemarse", lamp[0], lamp[1], lamp[2]);
+        // lo de antes, para dejar constancia de por que se cambio: normalizar por el maximo
+        int viejo = (int)(powf(0.2f / 400.f, 1.f / 2.2f) * 255.f + 0.5f);
+        ok(viejo < 12 && mid[1] > 5 * viejo, "el metodo viejo daba %d (casi negro) y el nuevo %d", viejo, mid[1]);
+    }
+    // 3) NaN, infinito y negativos no rompen nada (y NaN no se vuelve blanco)
+    {
+        float px[] = { NAN, INFINITY, -3.f, 2.f, 0.5f, 0.25f };
+        unsigned char out[8];
+        tm_to_rgba8(px, 3, 2, 1, out);
+        ok(out[0] == 0, "NaN tendria que quedar negro, quedo %d", out[0]);
+        ok(out[2] == 0, "un valor negativo tendria que quedar negro, quedo %d", out[2]);
+    }
+    // 4) gris y alfa
+    {
+        float gray[] = { 0.5f }, rgba[] = { 0.5f, 0.5f, 0.5f, 0.5f };
+        unsigned char o1[4], o2[4];
+        tm_to_rgba8(gray, 1, 1, 1, o1);
+        tm_to_rgba8(rgba, 4, 1, 1, o2);
+        ok(o1[0] == o1[1] && o1[1] == o1[2] && o1[0] == 188, "gris: %d,%d,%d", o1[0], o1[1], o1[2]);
+        ok(o2[3] == 128, "alfa 0,5 = %d, esperaba 128", o2[3]);
+    }
+}
+
+// PFM armado en memoria: color y gris, little y big endian. Los datos van de abajo hacia arriba.
+static std::vector<unsigned char> makePfm(bool color, bool little, int W, int H, const std::vector<float>& topDown) {
+    char head[64];
+    int n = snprintf(head, sizeof head, "%s\n%d %d\n%s\n", color ? "PF" : "Pf", W, H, little ? "-1.0" : "1.0");
+    std::vector<unsigned char> b(head, head + n);
+    int ch = color ? 3 : 1;
+    for (int y = H - 1; y >= 0; y--) for (int x = 0; x < W * ch; x++) {
+        float v = topDown[(size_t)y * W * ch + x];
+        unsigned char q[4]; memcpy(q, &v, 4);
+        if (little) b.insert(b.end(), q, q + 4); else { b.push_back(q[3]); b.push_back(q[2]); b.push_back(q[1]); b.push_back(q[0]); }
+    }
+    return b;
+}
+static void testPfm() {
+    g_case = "pfm";
+    for (int little = 0; little < 2; little++) for (int color = 0; color < 2; color++) {
+        const int W = 3, H = 2, ch = color ? 3 : 1;
+        std::vector<float> src((size_t)W * H * ch);
+        for (size_t i = 0; i < src.size(); i++) src[i] = (float)i / (float)src.size();
+        std::vector<unsigned char> file = makePfm(color != 0, little != 0, W, H, src);
+        int w = 0, h = 0, c = 0;
+        float* f = ex_pfm_float(file.data(), file.size(), &w, &h, &c);
+        ok(f && w == W && h == H && c == ch, "pfm %s %s: %dx%d x%d", color ? "color" : "gris", little ? "LE" : "BE", w, h, c);
+        if (f) {
+            bool same = true;
+            for (size_t i = 0; i < src.size(); i++) same = same && f[i] == src[i];
+            ok(same, "pfm %s %s: los valores o el orden de las filas no coinciden", color ? "color" : "gris", little ? "LE" : "BE");
+            free(f);
+        }
+        unsigned char* p = exotic_load(file.data(), file.size(), "pfm", &w, &h);
+        ok(p != nullptr, "exotic_load pfm");
+        free(p);
+    }
+}
+
 // Nada de esto es una imagen valida: lo que importa es que devuelva NULL sin
 // romperse ni leerse de rango (los buffers no estan NUL-terminados).
 static void testGarbage() {
@@ -526,6 +615,8 @@ int main() {
     testTextures();
     testSci();
     testXcf();
+    testToneMap();
+    testPfm();
     testGarbage();
     printf("\n%d asserts, %d fallaron\n", checks, fails);
     if (!fails) printf("todo OK\n");

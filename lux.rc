@@ -7,8 +7,8 @@
 1 24 "lux.manifest"
 
 1 VERSIONINFO
- FILEVERSION 1,0,1,0
- PRODUCTVERSION 1,0,1,0
+ FILEVERSION 1,1,0,0
+ PRODUCTVERSION 1,1,0,0
  FILEOS VOS_NT_WINDOWS32
  FILETYPE VFT_APP
 BEGIN
@@ -18,11 +18,11 @@ BEGIN
     BEGIN
       VALUE "CompanyName",      "Agustin Yarrus"
       VALUE "FileDescription",  "Lux - visor de imagenes dark y minimalista"
-      VALUE "FileVersion",      "1.0.1.0"
+      VALUE "FileVersion",      "1.1.0.0"
       VALUE "InternalName",     "lux"
       VALUE "OriginalFilename", "lux.exe"
       VALUE "ProductName",      "Lux"
-      VALUE "ProductVersion",   "1.0.1.0"
+      VALUE "ProductVersion",   "1.1.0.0"
       VALUE "LegalCopyright",   "(c) Agustin Yarrus - MIT"
     END
   END

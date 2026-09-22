@@ -49,7 +49,7 @@ try { Start-Transcript -Path "$env:TEMP\lux_install.log" -Force | Out-Null } cat
 
 $AppName   = 'Lux'
 # la version sale del VERSIONINFO del exe (lux.rc): asi nunca queda vieja aca
-$Version   = try { (Get-Item (Join-Path $PSScriptRoot 'lux.exe') -ErrorAction Stop).VersionInfo.FileVersion -replace '\.0$', '' } catch { '1.0.1' }
+$Version   = try { (Get-Item (Join-Path $PSScriptRoot 'lux.exe') -ErrorAction Stop).VersionInfo.FileVersion -replace '\.0$', '' } catch { '1.1.0' }
 $Publisher = 'Agustin Yarrus'
 $exeName   = 'lux.exe'
 $src       = $PSScriptRoot
